@@ -1,0 +1,6 @@
+MODULE    = wdfldr.sys
+IMPORTS   = hal ntoskrnl
+EXTRADLLFLAGS = -Wl,--subsystem,native -mno-cygwin
+
+C_SRCS = \
+	wdfldr_main.c

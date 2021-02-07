@@ -217,6 +217,16 @@ SOURCES = \
 	ddk/usbdlib.h \
 	ddk/usbioctl.h \
 	ddk/usbiodef.h \
+	ddk/wdf.h \
+	ddk/wdfchildlist.h \
+	ddk/wdfdevice.h \
+	ddk/wdfdriver.h \
+	ddk/wdffuncenum.h \
+	ddk/wdfglobals.h \
+	ddk/wdfio.h \
+	ddk/wdfobject.h \
+	ddk/wdftimer.h \
+	ddk/wdftypes.h \
 	ddk/wdm.h \
 	ddk/winddi.h \
 	ddk/winddiui.h \
