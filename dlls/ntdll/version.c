@@ -218,10 +218,17 @@ static char wine_version[256];
 /*********************************************************************
  *                  wine_get_version
  */
-const char * CDECL wine_get_version(void)
-{
-    return wine_version;
-}
+ const char * CDECL wine_get_version(void)
+ {
+     static char version_with_tag[256];
+
+     if (!version_with_tag[0])
+         snprintf(version_with_tag, sizeof(version_with_tag),
+                  "%s (searchstars-custom from wine-cachyos-proton-slr)",
+                  wine_version);
+
+     return version_with_tag;
+ }
 
 
 /*********************************************************************
