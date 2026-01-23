@@ -2365,82 +2365,82 @@ static BOOL handle_syscall_trap( ucontext_t *sigcontext, siginfo_t *siginfo )
  *
  * Check for fault caused by invalid %gs value (some copy protection schemes mess with it).
  */
-static inline BOOL check_invalid_gsbase( ucontext_t *ucontext )
-{
-    unsigned int prefix_count = 0;
-    const BYTE *instr = (const BYTE *)RIP_sig( ucontext );
-    TEB *teb = NtCurrentTeb();
-    ULONG_PTR cur_gsbase = 0;
+ static inline BOOL check_invalid_gsbase( ucontext_t *ucontext )
+ {
+     unsigned int prefix_count = 0;
+     void *rip = (void *)RIP_sig( ucontext );
+     BYTE instr[16];
+     unsigned int i, len;
+     TEB *teb = NtCurrentTeb();
+     ULONG_PTR cur_gsbase = 0;
 
-    if (CS_sig(ucontext) != cs64_sel) return FALSE;
+     if (CS_sig(ucontext) != cs64_sel) return FALSE;
 
-#ifdef __linux__
-    if (user_shared_data->ProcessorFeatures[PF_RDWRFSGSBASE_AVAILABLE])
-        __asm__("rdgsbase %0" : "=r" (cur_gsbase));
-    else
-        arch_prctl( ARCH_GET_GS, &cur_gsbase );
-#elif defined(__FreeBSD__) || defined(__FreeBSD_kernel__)
-    amd64_get_gsbase( &cur_gsbase );
-#elif defined(__NetBSD__)
-    sysarch( X86_64_GET_GSBASE, &cur_gsbase );
-#endif
+ #ifdef __linux__
+     arch_prctl( ARCH_GET_GS, &cur_gsbase );
+ #elif defined(__FreeBSD__) || defined(__FreeBSD_kernel__)
+     amd64_get_gsbase( &cur_gsbase );
+ #elif defined(__NetBSD__)
+     sysarch( X86_64_GET_GSBASE, &cur_gsbase );
+ #endif
 
-    if (cur_gsbase == (ULONG_PTR)teb) return FALSE;
+     if (cur_gsbase == (ULONG_PTR)teb) return FALSE;
 
-    for (;;)
-    {
-        switch (*instr)
-        {
-        /* instruction prefixes */
-        case 0x2e:  /* %cs: */
-        case 0x36:  /* %ss: */
-        case 0x3e:  /* %ds: */
-        case 0x26:  /* %es: */
-        case 0x40:  /* rex */
-        case 0x41:  /* rex */
-        case 0x42:  /* rex */
-        case 0x43:  /* rex */
-        case 0x44:  /* rex */
-        case 0x45:  /* rex */
-        case 0x46:  /* rex */
-        case 0x47:  /* rex */
-        case 0x48:  /* rex */
-        case 0x49:  /* rex */
-        case 0x4a:  /* rex */
-        case 0x4b:  /* rex */
-        case 0x4c:  /* rex */
-        case 0x4d:  /* rex */
-        case 0x4e:  /* rex */
-        case 0x4f:  /* rex */
-        case 0x64:  /* %fs: */
-        case 0x66:  /* opcode size */
-        case 0x67:  /* addr size */
-        case 0xf0:  /* lock */
-        case 0xf2:  /* repne */
-        case 0xf3:  /* repe */
-            if (++prefix_count >= 15) return FALSE;
-            instr++;
-            continue;
-        case 0x65:  /* %gs: */
-            break;
-        default:
-            return FALSE;
-        }
-        break;
-    }
+     len = virtual_uninterrupted_read_memory( rip, instr, sizeof(instr) );
+     if (!len) return FALSE;
 
-    TRACE( "gsbase %016lx teb %p at instr %p, fixing up\n", cur_gsbase, teb, instr );
+     for (i = 0; i < len; i++)
+     {
+         switch (instr[i])
+         {
+         /* instruction prefixes */
+         case 0x2e:  /* %cs: */
+         case 0x36:  /* %ss: */
+         case 0x3e:  /* %ds: */
+         case 0x26:  /* %es: */
+         case 0x40:  /* rex */
+         case 0x41:  /* rex */
+         case 0x42:  /* rex */
+         case 0x43:  /* rex */
+         case 0x44:  /* rex */
+         case 0x45:  /* rex */
+         case 0x46:  /* rex */
+         case 0x47:  /* rex */
+         case 0x48:  /* rex */
+         case 0x49:  /* rex */
+         case 0x4a:  /* rex */
+         case 0x4b:  /* rex */
+         case 0x4c:  /* rex */
+         case 0x4d:  /* rex */
+         case 0x4e:  /* rex */
+         case 0x4f:  /* rex */
+         case 0x64:  /* %fs: */
+         case 0x66:  /* opcode size */
+         case 0x67:  /* addr size */
+         case 0xf0:  /* lock */
+         case 0xf2:  /* repne */
+         case 0xf3:  /* repe */
+             if (++prefix_count >= 15) return FALSE;
+             continue;
+         case 0x65:  /* %gs: */
+             break;
+         default:
+             return FALSE;
+         }
+         break;
+     }
 
-#ifdef __linux__
-    arch_prctl( ARCH_SET_GS, teb );
-#elif defined(__FreeBSD__) || defined(__FreeBSD_kernel__)
-    amd64_set_gsbase( teb );
-#elif defined(__NetBSD__)
-    sysarch( X86_64_SET_GSBASE, &teb );
-#endif
-    return TRUE;
-}
+     TRACE( "gsbase %016lx teb %p at instr %p, fixing up\n", cur_gsbase, teb, rip );
 
+ #ifdef __linux__
+     arch_prctl( ARCH_SET_GS, teb );
+ #elif defined(__FreeBSD__) || defined(__FreeBSD_kernel__)
+     amd64_set_gsbase( teb );
+ #elif defined(__NetBSD__)
+     sysarch( X86_64_SET_GSBASE, &teb );
+ #endif
+     return TRUE;
+ }
 
 /**********************************************************************
  *		segv_handler
