@@ -1819,6 +1819,10 @@ static void load_mac_fonts(void)
 static BOOL init_freetype(void)
 {
     ft_handle = dlopen(SONAME_LIBFREETYPE, RTLD_NOW);
+#ifdef __APPLE__
+    if (!ft_handle) ft_handle = dlopen("/usr/local/lib/" SONAME_LIBFREETYPE, RTLD_NOW);
+    if (!ft_handle) ft_handle = dlopen("/opt/homebrew/lib/" SONAME_LIBFREETYPE, RTLD_NOW);
+#endif
     if(!ft_handle) {
         WINE_MESSAGE(
       "Wine cannot find the FreeType font library.  To enable Wine to\n"

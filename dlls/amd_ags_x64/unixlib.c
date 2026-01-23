@@ -31,9 +31,11 @@
 #include <fcntl.h>
 #include <errno.h>
 
+#ifdef __linux__
 #include <xf86drm.h>
 #include <amdgpu_drm.h>
 #include <amdgpu.h>
+#endif
 
 #include "ntstatus.h"
 #define WIN32_NO_STATUS
@@ -46,6 +48,7 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(amd_ags);
 
+#ifdef __linux__
 #define MAX_DEVICE_COUNT 64
 
 static unsigned int device_count;
@@ -281,3 +284,25 @@ const unixlib_entry_t __wine_unix_call_funcs[] =
     init,
     get_device_info,
 };
+
+#else
+
+static NTSTATUS init( void *args )
+{
+    (void)args;
+    return STATUS_NOT_IMPLEMENTED;
+}
+
+static NTSTATUS get_device_info( void *args )
+{
+    (void)args;
+    return STATUS_NOT_IMPLEMENTED;
+}
+
+const unixlib_entry_t __wine_unix_call_funcs[] =
+{
+    init,
+    get_device_info,
+};
+
+#endif

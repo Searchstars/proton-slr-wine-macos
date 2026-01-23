@@ -2008,8 +2008,15 @@ static void vulkan_init_once(void)
 {
     if (!(vulkan_handle = dlopen( SONAME_LIBVULKAN, RTLD_NOW )))
     {
-        ERR( "Failed to load %s\n", SONAME_LIBVULKAN );
-        return;
+#ifdef __APPLE__
+        vulkan_handle = dlopen( "/usr/local/lib/" SONAME_LIBVULKAN, RTLD_NOW );
+        if (!vulkan_handle) vulkan_handle = dlopen( "/opt/homebrew/lib/" SONAME_LIBVULKAN, RTLD_NOW );
+#endif
+        if (!vulkan_handle)
+        {
+            ERR( "Failed to load %s\n", SONAME_LIBVULKAN );
+            return;
+        }
     }
 
 #define LOAD_FUNCPTR( f )                                                                          \
