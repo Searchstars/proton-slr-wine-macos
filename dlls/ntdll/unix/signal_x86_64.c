@@ -2255,6 +2255,7 @@ static inline BOOL handle_rosetta_io_port( ucontext_t *sigcontext, CONTEXT *cont
     unsigned int len = virtual_uninterrupted_read_memory( (BYTE *)context->Rip, instr, sizeof(instr) );
     unsigned int opsize = 4;
     WORD port;
+    const WORD vmware_backdoor_port = 0x5658;
 
     for (i = 0; i < len; i++) switch (instr[i])
     {
@@ -2298,6 +2299,7 @@ static inline BOOL handle_rosetta_io_port( ucontext_t *sigcontext, CONTEXT *cont
     case 0xe5: /* in eax, imm8 */
         if (i + 1 >= len) return FALSE;
         port = instr[i + 1];
+        if (port == vmware_backdoor_port) return FALSE;
         if (instr[i] == 0xe4) opsize = 1;
         dump_io_instr( instr, len, (void *)context->Rip );
         set_rax_low( sigcontext, context, opsize, 0 );
@@ -2310,6 +2312,7 @@ static inline BOOL handle_rosetta_io_port( ucontext_t *sigcontext, CONTEXT *cont
     case 0xe7: /* out imm8, eax */
         if (i + 1 >= len) return FALSE;
         port = instr[i + 1];
+        if (port == vmware_backdoor_port) return FALSE;
         if (instr[i] == 0xe6) opsize = 1;
         dump_io_instr( instr, len, (void *)context->Rip );
         RIP_sig(sigcontext) += prefix_count + 2;
@@ -2320,6 +2323,7 @@ static inline BOOL handle_rosetta_io_port( ucontext_t *sigcontext, CONTEXT *cont
     case 0xec: /* in al, dx */
     case 0xed: /* in eax, dx */
         port = (WORD)context->Rdx;
+        if (port == vmware_backdoor_port) return FALSE;
         if (instr[i] == 0xec) opsize = 1;
         dump_io_instr( instr, len, (void *)context->Rip );
         set_rax_low( sigcontext, context, opsize, 0 );
@@ -2331,6 +2335,7 @@ static inline BOOL handle_rosetta_io_port( ucontext_t *sigcontext, CONTEXT *cont
     case 0xee: /* out dx, al */
     case 0xef: /* out dx, eax */
         port = (WORD)context->Rdx;
+        if (port == vmware_backdoor_port) return FALSE;
         if (instr[i] == 0xee) opsize = 1;
         dump_io_instr( instr, len, (void *)context->Rip );
         RIP_sig(sigcontext) += prefix_count + 1;
@@ -3014,14 +3019,14 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
     case TRAP_x86_PRIVINFLT:   /* Invalid opcode exception */
 #ifdef __APPLE__
         /* CW HACK 20186 */
+        if (handle_multibyte_nop( ucontext, &context.c )) return;
         if (handle_cet_nop( ucontext, &context.c )) return;
+        if (handle_rosetta_io_port( ucontext, &context.c )) return;
+        if (handle_rosetta_mov_cr( ucontext, &context.c )) return;
 #endif
         rec.ExceptionCode = EXCEPTION_ILLEGAL_INSTRUCTION;
 #ifdef __APPLE__
 	    if (handle_fndisi( ucontext, &context.c )) return;
-        if (handle_multibyte_nop( ucontext, &context.c )) return;
-        if (handle_rosetta_io_port( ucontext, &context.c )) return;
-        if (handle_rosetta_mov_cr( ucontext, &context.c )) return;
 #endif
         break;
     case TRAP_x86_STKFLT:  /* Stack fault */

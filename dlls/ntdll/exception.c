@@ -131,6 +131,77 @@ static void dump_hex( const void *addr )
     WARN( "dumphex %p: %s\n", addr, line );
 }
 
+static BOOL seh_verbose_enabled(void)
+{
+    static int cached = -1;
+
+    if (cached == -1)
+    {
+        static const WCHAR varW[] = {'W','I','N','E','_','S','E','H','_','V','E','R','B','O','S','E',0};
+        UNICODE_STRING name = { sizeof(varW) - sizeof(WCHAR), sizeof(varW), (WCHAR *)varW };
+        WCHAR val[2];
+        UNICODE_STRING value = { 0, sizeof(val), val };
+
+        cached = (RtlQueryEnvironmentVariable_U( NULL, &name, &value ) == STATUS_SUCCESS);
+    }
+    return cached;
+}
+
+static void log_verbose_exception( const EXCEPTION_RECORD *rec )
+{
+    if (!seh_verbose_enabled()) return;
+
+    if (rec->ExceptionCode == EXCEPTION_ACCESS_VIOLATION ||
+        rec->ExceptionCode == EXCEPTION_IN_PAGE_ERROR)
+    {
+        const char *access = "unknown";
+
+        if (rec->NumberParameters >= 1)
+        {
+            switch (rec->ExceptionInformation[0])
+            {
+            case 0: access = "read"; break;
+            case 1: access = "write"; break;
+            case 8: access = "exec"; break;
+            }
+        }
+
+        if (rec->NumberParameters >= 2)
+        {
+            void *fault_addr = (void *)rec->ExceptionInformation[1];
+            MEMORY_BASIC_INFORMATION mbi;
+            NTSTATUS status;
+
+            status = NtQueryVirtualMemory( NtCurrentProcess(), fault_addr, MemoryBasicInformation,
+                                           &mbi, sizeof(mbi), NULL );
+            if (!status)
+            {
+                TRACE_(seh)( "AV %s addr %p: base %p alloc_base %p size %Ix state %#lx protect %#lx type %#lx\n",
+                             access, fault_addr, mbi.BaseAddress, mbi.AllocationBase,
+                             (SIZE_T)mbi.RegionSize, mbi.State, mbi.Protect, mbi.Type );
+            }
+            else
+            {
+                TRACE_(seh)( "AV %s addr %p: NtQueryVirtualMemory failed %#lx\n", access, fault_addr, status );
+            }
+        }
+    }
+
+    if (rec->ExceptionAddress)
+    {
+        struct debugstr_pc_args params;
+        char buffer[256];
+
+        params.pc = rec->ExceptionAddress;
+        params.buffer = buffer;
+        params.size = sizeof(buffer);
+        if (!WINE_UNIX_CALL( unix_debugstr_pc, &params ))
+            TRACE_(seh)( "exception address %p (%s)\n", rec->ExceptionAddress, buffer );
+    }
+
+    dump_hex( rec->ExceptionAddress );
+}
+
 
 static VECTORED_HANDLER *add_vectored_handler( LIST_ENTRY *handler_list, ULONG first,
                                                PVECTORED_EXCEPTION_HANDLER func )
@@ -244,6 +315,8 @@ NTSTATUS WINAPI dispatch_exception( EXCEPTION_RECORD *rec, CONTEXT *context )
         else
             WINE_BACKTRACE_LOG( "--- Exception %#lx.\n", rec->ExceptionCode );
     }
+
+    log_verbose_exception( rec );
 
     switch (rec->ExceptionCode)
     {

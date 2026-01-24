@@ -2613,6 +2613,16 @@ const char *WINAPI PsGetProcessImageFileName( PEPROCESS process )
 }
 
 /*********************************************************************
+ *           PsGetProcessPeb    (NTOSKRNL.@)
+ */
+PPEB WINAPI PsGetProcessPeb( PEPROCESS process )
+{
+    PPEB peb = process ? process->info.PebBaseAddress : NULL;
+    TRACE("%p -> %p\n", process, peb);
+    return peb;
+}
+
+/*********************************************************************
  *           PsReferencePrimaryToken    (NTOSKRNL.@)
  */
 PACCESS_TOKEN WINAPI PsReferencePrimaryToken( PEPROCESS process )

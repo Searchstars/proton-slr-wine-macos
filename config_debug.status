@@ -526,7 +526,7 @@ _ASBOX
 wine_fn_output_makedep ()
 {
     as_dir=tools; as_fn_mkdir_p
-    gcc -m64 -c -Itools -Iinclude -Iinclude -D__WINESRC__ -DWINE_UNIX_LIB  -Wall -pipe -fcf-protection=none -fvisibility=hidden -fno-stack-protector -fno-strict-aliasing -Wdeclaration-after-statement -Wempty-body -Wignored-qualifiers -Winit-self -Wpointer-arith -Wno-pragma-pack -Wstrict-prototypes -Wtype-limits -Wunused-but-set-parameter -Wvla -Wwrite-strings  -O2 -g0 -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 -o tools/makedep.o tools/makedep.c
+    gcc -m64 -c -Itools -Iinclude -Iinclude -D__WINESRC__ -DWINE_UNIX_LIB  -Wall -pipe -fcf-protection=none -fvisibility=hidden -fno-stack-protector -fno-strict-aliasing -Wdeclaration-after-statement -Wempty-body -Wignored-qualifiers -Winit-self -Wpointer-arith -Wno-pragma-pack -Wstrict-prototypes -Wtype-limits -Wunused-but-set-parameter -Wvla -Wwrite-strings -O0 -g -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 -o tools/makedep.o tools/makedep.c
     gcc -m64 -o tools/makedep tools/makedep.o
 }
 wine_fn_output_makefile ()

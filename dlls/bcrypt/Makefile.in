@@ -1,7 +1,7 @@
 MODULE    = bcrypt.dll
 IMPORTLIB = bcrypt
 IMPORTS   = $(TOMCRYPT_PE_LIBS) advapi32
-EXTRAINCL = $(TOMCRYPT_PE_CFLAGS)
+EXTRAINCL = $(TOMCRYPT_PE_CFLAGS) -I$(top_srcdir)/libs/tomcrypt/src/headers
 UNIXLIB   = bcrypt.so
 UNIX_CFLAGS = $(GNUTLS_CFLAGS) $(GMP_CFLAGS)
 
