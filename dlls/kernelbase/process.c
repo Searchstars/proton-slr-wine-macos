@@ -719,7 +719,7 @@ static void sync_env_var_to_unix( WCHAR *env, const char *name )
     } else __wine_set_unix_env( name, NULL );
 }
 
-static const WCHAR *hack_append_command_line( const WCHAR *cmd, const WCHAR *cmd_line )
+static const WCHAR *hack_append_command_line_crossover( const WCHAR *cmd, const WCHAR *cmd_line )
 {
     static const struct
     {
@@ -767,7 +767,6 @@ BOOL WINAPI DECLSPEC_HOTPATCH CreateProcessInternalW( HANDLE token, const WCHAR 
     HANDLE parent = 0, debug = 0;
     const WCHAR *append;
     char *product_name = NULL;
-    const WCHAR *append;
     ULONG nt_flags = 0;
     USHORT machine = 0;
     NTSTATUS status;
@@ -823,7 +822,7 @@ BOOL WINAPI DECLSPEC_HOTPATCH CreateProcessInternalW( HANDLE token, const WCHAR 
     }
 
     /* CROSSOVER HACK */
-    if ((append = hack_append_command_line( app_name, tidy_cmdline )))
+    if ((append = hack_append_command_line_crossover( app_name, tidy_cmdline )))
     {
         WCHAR *new_cmdline = RtlAllocateHeap( GetProcessHeap(), 0,
                                               sizeof(WCHAR) * (lstrlenW(cmd_line) + lstrlenW(append) + 1) );
