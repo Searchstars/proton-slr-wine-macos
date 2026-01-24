@@ -1940,6 +1940,91 @@ static inline BOOL handle_fndisi( ucontext_t *sigcontext, CONTEXT *context )
 }
 #endif
 
+#ifdef __APPLE__
+/***********************************************************************
+ *           handle_rosetta_multibyte_nop
+ *
+ * Rosetta 2 may raise SIGILL on multi-byte NOPs (0F 1F /0). Treat as NOP.
+ */
+static inline BOOL handle_rosetta_multibyte_nop( ucontext_t *sigcontext, CONTEXT *context )
+{
+    BYTE instr[16];
+    unsigned int i, prefix_count = 0;
+    unsigned int len = virtual_uninterrupted_read_memory( (BYTE *)context->Rip, instr, sizeof(instr) );
+
+    for (i = 0; i < len; i++) switch (instr[i])
+    {
+    /* instruction prefixes */
+    case 0x2e:  /* %cs: */
+    case 0x36:  /* %ss: */
+    case 0x3e:  /* %ds: */
+    case 0x26:  /* %es: */
+    case 0x40:  /* rex */
+    case 0x41:  /* rex */
+    case 0x42:  /* rex */
+    case 0x43:  /* rex */
+    case 0x44:  /* rex */
+    case 0x45:  /* rex */
+    case 0x46:  /* rex */
+    case 0x47:  /* rex */
+    case 0x48:  /* rex */
+    case 0x49:  /* rex */
+    case 0x4a:  /* rex */
+    case 0x4b:  /* rex */
+    case 0x4c:  /* rex */
+    case 0x4d:  /* rex */
+    case 0x4e:  /* rex */
+    case 0x4f:  /* rex */
+    case 0x64:  /* %fs: */
+    case 0x65:  /* %gs: */
+    case 0x66:  /* opcode size */
+    case 0x67:  /* addr size */
+    case 0xf0:  /* lock */
+    case 0xf2:  /* repne */
+    case 0xf3:  /* repe */
+        if (++prefix_count >= 15) return FALSE;
+        continue;
+    case 0x0f:
+        if (i + 2 >= len) return FALSE;
+        if (instr[i + 1] != 0x1f) return FALSE;
+        {
+            unsigned int size = 3;
+            BYTE modrm = instr[i + 2];
+            BYTE mod = modrm >> 6;
+            BYTE reg = (modrm >> 3) & 7;
+            BYTE rm = modrm & 7;
+
+            if (reg != 0) return FALSE; /* only /0 are NOPs */
+
+            if (mod != 3 && rm == 4)
+            {
+                if (i + size >= len) return FALSE;
+                BYTE sib = instr[i + size];
+                BYTE base = sib & 7;
+                size++;
+                if (mod == 0 && base == 5) size += 4;
+                else if (mod == 1) size += 1;
+                else if (mod == 2) size += 4;
+            }
+            else
+            {
+                if (mod == 0 && rm == 5) size += 4;
+                else if (mod == 1) size += 1;
+                else if (mod == 2) size += 4;
+            }
+
+            RIP_sig(sigcontext) += prefix_count + size;
+            TRACE_(seh)( "skipped multi-byte NOP (%u bytes)\n", prefix_count + size );
+            return TRUE;
+        }
+        break;
+    default:
+        return FALSE;
+    }
+    return FALSE;
+}
+#endif
+
 /***********************************************************************
  *           is_privileged_instr
  *
@@ -2206,8 +2291,9 @@ static void install_bpf(struct sigaction *sig_act)
 
     {
         const char *sgi = getenv("SteamGameId");
-        if (sgi && (!strcmp(sgi, "1174180") || !strcmp(sgi, "1404210") || !strcmp(sgi, "1418100") || !strcmp(sgi, "2767030")
-                    || !strcmp(sgi, "2853730") || !strcmp( sgi, "298110" )))
+        const char *map_syscalls = getenv("PROTON_MAP_SYSCALLS");
+        if ((map_syscalls && atoi(map_syscalls)) || (sgi && (!strcmp(sgi, "1174180") || !strcmp(sgi, "1404210") || !strcmp(sgi, "1418100") || !strcmp(sgi, "2767030")
+    || !strcmp(sgi, "2853730") || !strcmp( sgi, "298110" ))))
         {
             /* Use specific signal handler. */
             sig_act->sa_sigaction = sigsys_handler_rdr2;
@@ -2610,6 +2696,7 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
 #ifdef __APPLE__
         /* CW HACK 20186 */
         if (handle_cet_nop( ucontext, &context.c )) return;
+        if (handle_rosetta_multibyte_nop( ucontext, &context.c )) return;
 #endif
         rec.ExceptionCode = EXCEPTION_ILLEGAL_INSTRUCTION;
 #ifdef __APPLE__
