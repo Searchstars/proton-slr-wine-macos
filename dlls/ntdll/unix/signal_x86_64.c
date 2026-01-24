@@ -1942,14 +1942,27 @@ static inline BOOL handle_fndisi( ucontext_t *sigcontext, CONTEXT *context )
 
 #ifdef __APPLE__
 /***********************************************************************
- *           handle_rosetta_multibyte_nop
+ *           handle_multibyte_nop
  *
- * Rosetta 2 may raise SIGILL on multi-byte NOPs (0F 1F /0). Treat as NOP.
+ * Check whether the fault location should be considered a multi-byte NOP
  */
-static inline BOOL handle_rosetta_multibyte_nop( ucontext_t *sigcontext, CONTEXT *context )
+
+/* scable-index-base bits */
+#define SIB_S(b)        ( ( b ) >> 6 )
+#define SIB_I(b)        ( ( ( b ) >> 3 ) & 7 )
+#define SIB_B(b)        ( ( b ) & 7 )
+
+/* modrm bits */
+#define MODRM_REG(b)    ( ( ( b ) >> 3 ) & 7 )
+#define MODRM_NNN(b)    ( ( ( b ) >> 3 ) & 7 )
+#define MODRM_MOD(b)    ( ( ( b ) >> 6 ) & 3 )
+#define MODRM_RM(b)     ( ( b ) & 7 )
+
+static inline BOOL handle_multibyte_nop( ucontext_t *sigcontext, CONTEXT *context )
 {
-    BYTE instr[16];
-    unsigned int i, prefix_count = 0;
+    BYTE modrm;
+    BYTE instr[23];
+    unsigned int i, size, prefix_count = 0;
     unsigned int len = virtual_uninterrupted_read_memory( (BYTE *)context->Rip, instr, sizeof(instr) );
 
     for (i = 0; i < len; i++) switch (instr[i])
@@ -1984,39 +1997,49 @@ static inline BOOL handle_rosetta_multibyte_nop( ucontext_t *sigcontext, CONTEXT
     case 0xf3:  /* repe */
         if (++prefix_count >= 15) return FALSE;
         continue;
+
     case 0x0f:
-        if (i + 2 >= len) return FALSE;
-        if (instr[i + 1] != 0x1f) return FALSE;
+        
+        if (len - i < 3 || instr[i + 1] != 0x1f) return FALSE;
+
+        size = prefix_count + 2;
+
+        modrm = instr[i + 2];
+
+        if (MODRM_NNN(modrm) == 0)
         {
-            unsigned int size = 3;
-            BYTE modrm = instr[i + 2];
-            BYTE mod = modrm >> 6;
-            BYTE reg = (modrm >> 3) & 7;
-            BYTE rm = modrm & 7;
+            size += 1;
 
-            if (reg != 0) return FALSE; /* only /0 are NOPs */
-
-            if (mod != 3 && rm == 4)
-            {
-                if (i + size >= len) return FALSE;
-                BYTE sib = instr[i + size];
-                BYTE base = sib & 7;
+            if (MODRM_MOD(modrm) != 3 && MODRM_RM(modrm) == 4) {
+                BYTE sib = instr[i + 3];
                 size++;
-                if (mod == 0 && base == 5) size += 4;
-                else if (mod == 1) size += 1;
-                else if (mod == 2) size += 4;
-            }
-            else
-            {
-                if (mod == 0 && rm == 5) size += 4;
-                else if (mod == 1) size += 1;
-                else if (mod == 2) size += 4;
+
+                if (MODRM_MOD(modrm) == 0 && SIB_B(sib) == 5)
+                {
+                    size += 4;
+                }
             }
 
-            RIP_sig(sigcontext) += prefix_count + size;
-            TRACE_(seh)( "skipped multi-byte NOP (%u bytes)\n", prefix_count + size );
+            if (MODRM_MOD(modrm) == 0 && MODRM_RM(modrm) == 5)
+            {
+                size += 4;
+            }
+            else if (MODRM_MOD(modrm) == 1)
+            {
+                size += 1;
+            }
+            else if (MODRM_MOD(modrm) == 2)
+            {
+                size += 4;
+            }
+
+            RIP_sig(sigcontext) += size;
+            TRACE_(seh)( "skipped multibyte nop instruction\n" );
+
             return TRUE;
         }
+
+        return FALSE;
         break;
     default:
         return FALSE;
@@ -2701,6 +2724,7 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
         rec.ExceptionCode = EXCEPTION_ILLEGAL_INSTRUCTION;
 #ifdef __APPLE__
 	    if (handle_fndisi( ucontext, &context.c )) return;
+        if (handle_multibyte_nop( ucontext, &context.c )) return;
 #endif
         break;
     case TRAP_x86_STKFLT:  /* Stack fault */
