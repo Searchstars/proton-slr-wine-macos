@@ -1999,7 +1999,7 @@ static inline BOOL handle_multibyte_nop( ucontext_t *sigcontext, CONTEXT *contex
         continue;
 
     case 0x0f:
-        
+
         if (len - i < 3 || instr[i + 1] != 0x1f) return FALSE;
 
         size = prefix_count + 2;
@@ -2314,9 +2314,8 @@ static void install_bpf(struct sigaction *sig_act)
 
     {
         const char *sgi = getenv("SteamGameId");
-        const char *map_syscalls = getenv("PROTON_MAP_SYSCALLS");
-        if ((map_syscalls && atoi(map_syscalls)) || (sgi && (!strcmp(sgi, "1174180") || !strcmp(sgi, "1404210") || !strcmp(sgi, "1418100") || !strcmp(sgi, "2767030")
-    || !strcmp(sgi, "2853730") || !strcmp( sgi, "298110" ))))
+        if (sgi && (!strcmp(sgi, "1174180") || !strcmp(sgi, "1404210") || !strcmp(sgi, "1418100") || !strcmp(sgi, "2767030")
+                    || !strcmp(sgi, "2853730") || !strcmp( sgi, "298110" )))
         {
             /* Use specific signal handler. */
             sig_act->sa_sigaction = sigsys_handler_rdr2;
@@ -2719,7 +2718,6 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
 #ifdef __APPLE__
         /* CW HACK 20186 */
         if (handle_cet_nop( ucontext, &context.c )) return;
-        if (handle_rosetta_multibyte_nop( ucontext, &context.c )) return;
 #endif
         rec.ExceptionCode = EXCEPTION_ILLEGAL_INSTRUCTION;
 #ifdef __APPLE__
