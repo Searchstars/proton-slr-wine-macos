@@ -2205,6 +2205,12 @@ static inline void dump_io_instr( const BYTE *instr, unsigned int len, void *ip 
  *           handle_rosetta_io_port
  *
  * Emulate IN/OUT instructions in user mode under Rosetta 2.
+ *
+ * SPECIAL LOGIC:
+ * - If port is 0x5658 (VMware Backdoor), return FALSE to let Wine raise
+ *   EXCEPTION_PRIV_INSTRUCTION. This fools the Anti-Cheat into thinking
+ *   it's running on bare metal where execution fails.
+ * - For other ports, return ~0ull to simulate "no device".
  */
 static inline BOOL handle_rosetta_io_port( ucontext_t *sigcontext, CONTEXT *context )
 {
@@ -2234,69 +2240,85 @@ static inline BOOL handle_rosetta_io_port( ucontext_t *sigcontext, CONTEXT *cont
         if (++prefix_count >= 15) return FALSE;
         continue;
     case 0x40:  /* rex */
-    case 0x41:
-    case 0x42:
-    case 0x43:
-    case 0x44:
-    case 0x45:
-    case 0x46:
-    case 0x47:
-    case 0x48:
-    case 0x49:
-    case 0x4a:
-    case 0x4b:
-    case 0x4c:
-    case 0x4d:
-    case 0x4e:
-    case 0x4f:
+    case 0x41: case 0x42: case 0x43:
+    case 0x44: case 0x45: case 0x46: case 0x47:
+    case 0x48: case 0x49: case 0x4a: case 0x4b:
+    case 0x4c: case 0x4d: case 0x4e: case 0x4f:
         if (++prefix_count >= 15) return FALSE;
         continue;
 
+    /* IN imm8 */
     case 0xe4: /* in al, imm8 */
     case 0xe5: /* in eax, imm8 */
         if (i + 1 >= len) return FALSE;
         port = instr[i + 1];
+
+        /* 检查 VMware 端口，如果是，故意失败 */
+        if (port == 0x5658) {
+            WARN_(seh)("VMware backdoor port %#x detected. Letting it CRASH.\n", port);
+            return FALSE;
+        }
+
         if (instr[i] == 0xe4) opsize = 1;
-        dump_io_instr( instr, len, (void *)context->Rip );
-        set_rax_low( sigcontext, context, opsize, 0 );
+        set_rax_low( sigcontext, context, opsize, ~0ull ); /* 返回 -1 */
         RIP_sig(sigcontext) += prefix_count + 2;
         context->Rip += prefix_count + 2;
         TRACE_(seh)( "emulated IN port %#x size %u\n", port, opsize );
         return TRUE;
 
+    /* OUT imm8 */
     case 0xe6: /* out imm8, al */
     case 0xe7: /* out imm8, eax */
         if (i + 1 >= len) return FALSE;
         port = instr[i + 1];
+
+        if (port == 0x5658) {
+            WARN_(seh)("VMware backdoor port %#x detected (OUT). Letting it CRASH.\n", port);
+            return FALSE;
+        }
+
         if (instr[i] == 0xe6) opsize = 1;
-        dump_io_instr( instr, len, (void *)context->Rip );
         RIP_sig(sigcontext) += prefix_count + 2;
         context->Rip += prefix_count + 2;
         TRACE_(seh)( "emulated OUT port %#x size %u\n", port, opsize );
         return TRUE;
 
+    /* IN DX */
     case 0xec: /* in al, dx */
     case 0xed: /* in eax, dx */
         port = (WORD)context->Rdx;
+
+        /* 关键修改：如果是 0x5658，返回 FALSE，让 Wine 抛出特权指令异常 */
+        if (port == 0x5658) {
+            WARN_(seh)("VMware backdoor port %#x detected (IN DX). Letting it CRASH.\n", port);
+            return FALSE;
+        }
+
         if (instr[i] == 0xec) opsize = 1;
-        dump_io_instr( instr, len, (void *)context->Rip );
-        set_rax_low( sigcontext, context, opsize, 0 );
+        set_rax_low( sigcontext, context, opsize, ~0ull ); /* 返回 -1 */
         RIP_sig(sigcontext) += prefix_count + 1;
         context->Rip += prefix_count + 1;
         TRACE_(seh)( "emulated IN port %#x size %u\n", port, opsize );
         return TRUE;
 
+    /* OUT DX */
     case 0xee: /* out dx, al */
     case 0xef: /* out dx, eax */
         port = (WORD)context->Rdx;
+
+        if (port == 0x5658) {
+             WARN_(seh)("VMware backdoor port %#x detected (OUT DX). Letting it CRASH.\n", port);
+             return FALSE;
+        }
+
         if (instr[i] == 0xee) opsize = 1;
-        dump_io_instr( instr, len, (void *)context->Rip );
         RIP_sig(sigcontext) += prefix_count + 1;
         context->Rip += prefix_count + 1;
         TRACE_(seh)( "emulated OUT port %#x size %u\n", port, opsize );
         return TRUE;
 
     default:
+        ERR( "Handle IO Port Failed! IP=%p Byte=%02x Index=%d\n", (void*)context->Rip, instr[i], i );
         return FALSE;
     }
     return FALSE;
