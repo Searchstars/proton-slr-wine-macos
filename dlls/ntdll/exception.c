@@ -101,6 +101,36 @@ static const char *debugstr_exception_code( DWORD code )
     return "unknown";
 }
 
+static void dump_hex( const void *addr )
+{
+    BYTE bytes[16];
+    unsigned int i;
+    char line[3 * sizeof(bytes) + 1];
+    char *p = line;
+
+    if (!addr)
+    {
+        WARN( "dumphex: null addr\n" );
+        return;
+    }
+
+    __TRY
+    {
+        memcpy( bytes, addr, sizeof(bytes) );
+    }
+    __EXCEPT_PAGE_FAULT
+    {
+        WARN( "dumphex: unreadable addr %p\n", addr );
+        return;
+    }
+    __ENDTRY
+
+    for (i = 0; i < sizeof(bytes); i++) p += sprintf( p, "%02x ", bytes[i] );
+    *p = 0;
+
+    WARN( "dumphex %p: %s\n", addr, line );
+}
+
 
 static VECTORED_HANDLER *add_vectored_handler( LIST_ENTRY *handler_list, ULONG first,
                                                PVECTORED_EXCEPTION_HANDLER func )
@@ -255,8 +285,17 @@ NTSTATUS WINAPI dispatch_exception( EXCEPTION_RECORD *rec, CONTEXT *context )
         break;
 
     default:
-        if (!TRACE_ON(seh)) WARN( "%s exception (code=%lx) raised\n",
-                                  debugstr_exception_code(rec->ExceptionCode), rec->ExceptionCode );
+        if (rec->ExceptionCode == EXCEPTION_ILLEGAL_INSTRUCTION)
+        {
+            ERR( "!!! ILLEGAL INSTRUCTION DETECTED at %p !!!\n", rec->ExceptionAddress );
+            dump_hex( rec->ExceptionAddress );
+        }
+
+        if (!TRACE_ON(seh))
+        {
+            WARN( "%s exception (code=%lx) raised\n",
+                debugstr_exception_code(rec->ExceptionCode), rec->ExceptionCode );
+        }
         break;
     }
 
