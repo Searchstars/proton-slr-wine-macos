@@ -250,6 +250,23 @@ static DWORD WINTRUST_AddTrustStepsFromFunctions(struct wintrust_step *steps,
     return numSteps;
 }
 
+static BOOL needs_wintrust_fixes(void)
+{
+    static volatile char cache = -1;
+    if (cache == -1)
+    {
+        WCHAR path[MAX_PATH], *p, *name;
+        
+        GetModuleFileNameW(NULL, path, MAX_PATH);
+        name = path;
+        if ((p = wcsrchr(name, '/'))) name = p + 1;
+        if ((p = wcsrchr(name, '\\'))) name = p + 1;
+        
+        cache = !wcsicmp(name, L"EM-Win64-Shipping.exe");
+    }
+    return cache;
+}
+
 static LONG WINTRUST_DefaultVerify(HWND hwnd, GUID *actionID,
  WINTRUST_DATA *data)
 {
@@ -293,7 +310,13 @@ error:
     free(provData);
 
 done:
-    TRACE("returning %08lx\n", err);
+    if (needs_wintrust_fixes() && data->dwUnionChoice == 1 && 
+        (wcscmp(data->pFile->pcwszFilePath, L"C:\\windows\\system32\\winex11.drv") == 0 || 
+         wcscmp(data->pFile->pcwszFilePath, L"C:\\windows\\system32\\winewayland.drv") == 0))
+    {
+        TRACE(" checking for winex11/winewayland, skipping.. \n");
+        err = 0;
+    }
     return err;
 }
 

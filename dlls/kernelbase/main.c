@@ -95,6 +95,24 @@ LONG WINAPI AppPolicyGetMediaFoundationCodecLoading(HANDLE token, AppPolicyMedia
     return ERROR_SUCCESS;
 }
 
+static BOOL is_genshin(void)
+{
+    static volatile char cache = -1;
+    BOOL ret = cache;
+    if (ret == -1)
+    {
+        const WCHAR *p, *name = NtCurrentTeb()->Peb->ProcessParameters->ImagePathName.Buffer;
+        if ((p = wcsrchr(name, '/')))
+            name = p + 1;
+        if ((p = wcsrchr(name, '\\')))
+            name = p + 1;
+        ret = (!wcsicmp(name, L"GenshinImpact.exe") ||
+               !wcsicmp(name, L"YuanShen.exe"));
+        cache = ret;
+    }
+    return ret;
+}
+
 /***********************************************************************
  *          AppPolicyGetProcessTerminationMethod (KERNELBASE.@)
  */
@@ -102,8 +120,18 @@ LONG WINAPI AppPolicyGetProcessTerminationMethod(HANDLE token, AppPolicyProcessT
 {
     FIXME("%p, %p\n", token, policy);
 
-    if(policy)
-        *policy = AppPolicyProcessTerminationMethod_ExitProcess;
+    if (policy)
+    {
+        if (is_genshin())
+        {
+            FIXME("Genshin Impact detected, forcefully closing..\n");
+            *policy = AppPolicyProcessTerminationMethod_TerminateProcess;
+        }
+        else
+        {
+            *policy = AppPolicyProcessTerminationMethod_ExitProcess;
+        }
+    }
 
     return ERROR_SUCCESS;
 }

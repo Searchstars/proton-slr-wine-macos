@@ -2296,6 +2296,9 @@ static void hacks_init(void)
     else if (main_argc > 1 && (strstr(main_argv[1], "Yakuza5.exe") ))
         disable_sfn = TRUE;
 
+    if (main_argc > 1 && (strstr(main_argv[1], "GF2_Exilium.exe")) )
+        setenv( "PROTON_MAP_SYSCALLS", "1", 0 );
+
     env_str = getenv("WINE_SIMULATE_ASYNC_READ");
     if (env_str)
         ac_odyssey = !!atoi(env_str);

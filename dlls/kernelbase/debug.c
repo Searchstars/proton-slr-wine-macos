@@ -537,6 +537,25 @@ static BOOL start_debugger( EXCEPTION_POINTERS *epointers, HANDLE event )
     format_exception_msg( epointers, buffer, sizeof(buffer) );
     MESSAGE( "wine: %s (thread %04lx), starting debugger...\n", buffer, GetCurrentThreadId() );
 
+    /* HACK: Reset AeDebug values before they're used with PROTON_DISABLE_AEDEBUG=1 */
+    /* Original values are taken from HKEY_LOCAL_MACHINE\Software\Microsoft\Windows NT\CurrentVersion\AeDebug*/
+    static volatile char cache = -1;
+    static BOOL aedebug_override = FALSE;
+    if (cache == -1)
+    {
+        char buffer[2];
+        DWORD size = GetEnvironmentVariableA("PROTON_DISABLE_AEDEBUG", buffer, sizeof(buffer));
+        aedebug_override = (size > 0);
+        cache = 0;
+    }
+
+    if (aedebug_override) 
+    { 
+        autostart = FALSE;
+        format = NULL;
+        goto skip_registry;
+    }
+
     attr.Length = sizeof(attr);
     attr.RootDirectory = 0;
     attr.ObjectName = &nameW;
@@ -591,6 +610,7 @@ static BOOL start_debugger( EXCEPTION_POINTERS *epointers, HANDLE event )
        NtClose( dbg_key );
     }
 
+skip_registry:
     if (format)
     {
         size_t format_size = lstrlenW( format ) + 2*20;

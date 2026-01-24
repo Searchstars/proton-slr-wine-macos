@@ -131,6 +131,7 @@ static BOOL WINAPI init_driver(INIT_ONCE *once, void *param, void **context)
     DriverFuncs driver;
     HKEY key;
     WCHAR reg_list[256], *p, *next, *driver_list = default_list;
+    WCHAR env_use_alsa[2];
 
     if(RegOpenKeyW(HKEY_CURRENT_USER, drv_keyW, &key) == ERROR_SUCCESS){
         DWORD size = sizeof(reg_list);
@@ -146,6 +147,17 @@ static BOOL WINAPI init_driver(INIT_ONCE *once, void *param, void **context)
         }
 
         RegCloseKey(key);
+    }
+
+    if (GetEnvironmentVariableW(L"PROTON_USE_WINEALSA", env_use_alsa, 2) > 0)
+    {
+        if (_wtoi(env_use_alsa) == 1)
+        {
+            default_list[0] = L'\0';
+            wcscat(default_list, L"alsa");
+            driver_list = default_list;
+            TRACE( "PROTON_USE_WINEALSA set, using alsa driver\n" );
+        }
     }
 
     TRACE("Loading driver list %s\n", wine_dbgstr_w(driver_list));
