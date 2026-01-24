@@ -91,6 +91,17 @@ WINE_DECLARE_DEBUG_CHANNEL(seh);
 
 #include "dwarf.h"
 
+/* scable-index-base bits */
+#define SIB_S(b)        ( ( b ) >> 6 )
+#define SIB_I(b)        ( ( ( b ) >> 3 ) & 7 )
+#define SIB_B(b)        ( ( b ) & 7 )
+
+/* modrm bits */
+#define MODRM_REG(b)    ( ( ( b ) >> 3 ) & 7 )
+#define MODRM_NNN(b)    ( ( ( b ) >> 3 ) & 7 )
+#define MODRM_MOD(b)    ( ( ( b ) >> 6 ) & 3 )
+#define MODRM_RM(b)     ( ( b ) & 7 )
+
 #ifdef __APPLE__
 static void *mac_thread_gsbase(void);
 #endif
@@ -1990,23 +2001,6 @@ static inline ULONG64 fake_control_register( unsigned int cr )
 #endif
 
 #ifdef __APPLE__
-/***********************************************************************
- *           handle_rosetta_multibyte_nop
- *
- * Check whether the fault location should be considered a multi-byte NOP
- */
-
-/* scable-index-base bits */
-#define SIB_S(b)        ( ( b ) >> 6 )
-#define SIB_I(b)        ( ( ( b ) >> 3 ) & 7 )
-#define SIB_B(b)        ( ( b ) & 7 )
-
-/* modrm bits */
-#define MODRM_REG(b)    ( ( ( b ) >> 3 ) & 7 )
-#define MODRM_NNN(b)    ( ( ( b ) >> 3 ) & 7 )
-#define MODRM_MOD(b)    ( ( ( b ) >> 6 ) & 3 )
-#define MODRM_RM(b)     ( ( b ) & 7 )
-
 static inline BOOL handle_multibyte_nop( ucontext_t *sigcontext, CONTEXT *context )
 {
     BYTE modrm;
@@ -2083,7 +2077,7 @@ static inline BOOL handle_multibyte_nop( ucontext_t *sigcontext, CONTEXT *contex
             }
 
             RIP_sig(sigcontext) += size;
-            TRACE_(seh)( "skipped multibyte nop instruction\n" );
+            //TRACE_(seh)( "skipped multibyte nop instruction\n" );
 
             return TRUE;
         }
@@ -2150,9 +2144,9 @@ static inline BOOL handle_rosetta_mov_cr( ucontext_t *sigcontext, CONTEXT *conte
         if (instr[i + 1] != 0x20) return FALSE;
         {
             BYTE modrm = instr[i + 2];
-            BYTE mod = modrm >> 6;
-            BYTE reg = ((modrm >> 3) & 7) | ((rex & 0x4) ? 8 : 0);
-            BYTE rm  = (modrm & 7) | ((rex & 0x1) ? 8 : 0);
+            BYTE mod = MODRM_MOD(modrm);
+            BYTE reg = MODRM_REG(modrm) | ((rex & 0x4) ? 8 : 0);
+            BYTE rm  = MODRM_RM(modrm)  | ((rex & 0x1) ? 8 : 0);
             ULONG64 value;
 
             if (mod != 3) return FALSE;
@@ -2160,7 +2154,7 @@ static inline BOOL handle_rosetta_mov_cr( ucontext_t *sigcontext, CONTEXT *conte
             set_gpr_value( sigcontext, context, rm, value );
             RIP_sig(sigcontext) += prefix_count + 3;
             context->Rip += prefix_count + 3;
-            TRACE_(seh)( "emulated MOV r%u, CR%u => %#llx\n", rm, reg, value );
+            TRACE_(seh)( "emulated MOV r%u, CR%u => %#lx\n", rm, reg, value );
             return TRUE;
         }
         break;
