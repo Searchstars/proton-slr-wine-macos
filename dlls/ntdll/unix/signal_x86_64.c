@@ -1062,7 +1062,11 @@ NTSTATUS WINAPI NtSetContextThread( HANDLE handle, const CONTEXT *context )
         ret = set_thread_context( handle, context, &self, IMAGE_FILE_MACHINE_AMD64 );
 #ifdef __APPLE__
         if ((flags & CONTEXT_DEBUG_REGISTERS) && (ret == STATUS_UNSUCCESSFUL))
-            WARN_(seh)( "Setting debug registers is not supported under Rosetta\n" );
+        {
+            /* CW HACK 22131 */
+            WARN_(seh)( "Setting debug registers is not supported under Rosetta, faking success\n" );
+            ret = STATUS_SUCCESS;
+        }
 #endif
         if (ret || !self) return ret;
         if (flags & CONTEXT_DEBUG_REGISTERS)
@@ -1290,6 +1294,16 @@ NTSTATUS set_thread_wow64_context( HANDLE handle, const void *ctx, ULONG size )
     if (!self)
     {
         NTSTATUS ret = set_thread_context( handle, context, &self, IMAGE_FILE_MACHINE_I386 );
+
+#ifdef __APPLE__
+        if ((flags & CONTEXT_DEBUG_REGISTERS) && (ret == STATUS_UNSUCCESSFUL))
+        {
+            /* CW HACK 22131 */
+            WARN_(seh)( "Setting debug registers is not supported under Rosetta, faking success\n" );
+            ret = STATUS_SUCCESS;
+        }
+#endif
+
         if (ret || !self) return ret;
         if (flags & CONTEXT_I386_DEBUG_REGISTERS)
         {
@@ -1798,6 +1812,133 @@ NTSTATUS WINAPI NtCallbackReturn( void *ret_ptr, ULONG ret_len, NTSTATUS status 
     user_mode_callback_return( ret_ptr, ret_len, status, NtCurrentTeb() );
 }
 
+#ifdef __APPLE__
+/***********************************************************************
+ *           handle_cet_nop
+ *
+ * Check if the fault location is an Intel CET instruction that should be treated as a NOP.
+ * Rosetta on Big Sur throws an exception for this, but is fixed in Monterey.
+ * CW HACK 20186
+ */
+static inline BOOL handle_cet_nop( ucontext_t *sigcontext, CONTEXT *context )
+{
+    BYTE instr[16];
+    unsigned int i, prefix_count = 0;
+    unsigned int len = virtual_uninterrupted_read_memory( (BYTE *)context->Rip, instr, sizeof(instr) );
+
+    for (i = 0; i < len; i++) switch (instr[i])
+    {
+    /* instruction prefixes */
+    case 0x2e:  /* %cs: */
+    case 0x36:  /* %ss: */
+    case 0x3e:  /* %ds: */
+    case 0x26:  /* %es: */
+    case 0x40:  /* rex */
+    case 0x41:  /* rex */
+    case 0x42:  /* rex */
+    case 0x43:  /* rex */
+    case 0x44:  /* rex */
+    case 0x45:  /* rex */
+    case 0x46:  /* rex */
+    case 0x47:  /* rex */
+    case 0x48:  /* rex */
+    case 0x49:  /* rex */
+    case 0x4a:  /* rex */
+    case 0x4b:  /* rex */
+    case 0x4c:  /* rex */
+    case 0x4d:  /* rex */
+    case 0x4e:  /* rex */
+    case 0x4f:  /* rex */
+    case 0x64:  /* %fs: */
+    case 0x65:  /* %gs: */
+    case 0x66:  /* opcode size */
+    case 0x67:  /* addr size */
+    case 0xf0:  /* lock */
+    case 0xf2:  /* repne */
+    case 0xf3:  /* repe */
+        if (++prefix_count >= 15) return FALSE;
+        continue;
+
+    case 0x0f: /* extended instruction */
+        if (i == len - 1) return 0;
+        switch (instr[i + 1])
+        {
+        case 0x1E:
+            /* RDSSPD/RDSSPQ: (prefixes) 0F 1E (modrm) */
+            RIP_sig(sigcontext) += prefix_count + 3;
+            TRACE_(seh)( "skipped RDSSPD/RDSSPQ instruction\n" );
+            return TRUE;
+        }
+        break;
+    default:
+        return FALSE;
+    }
+    return FALSE;
+}
+#endif
+
+#ifdef __APPLE__
+/***********************************************************************
+ *           handle_fndisi
+ *
+ * Check if the fault location is an x87 FNDISI instruction that should be treated as a NOP.
+ */
+static inline BOOL handle_fndisi( ucontext_t *sigcontext, CONTEXT *context )
+{
+    BYTE instr[16];
+    unsigned int i, prefix_count = 0;
+    unsigned int len = virtual_uninterrupted_read_memory( (BYTE *)context->Rip, instr, sizeof(instr) );
+
+    for (i = 0; i < len; i++) switch (instr[i])
+    {
+    /* instruction prefixes */
+    case 0x2e:  /* %cs: */
+    case 0x36:  /* %ss: */
+    case 0x3e:  /* %ds: */
+    case 0x26:  /* %es: */
+    case 0x40:  /* rex */
+    case 0x41:  /* rex */
+    case 0x42:  /* rex */
+    case 0x43:  /* rex */
+    case 0x44:  /* rex */
+    case 0x45:  /* rex */
+    case 0x46:  /* rex */
+    case 0x47:  /* rex */
+    case 0x48:  /* rex */
+    case 0x49:  /* rex */
+    case 0x4a:  /* rex */
+    case 0x4b:  /* rex */
+    case 0x4c:  /* rex */
+    case 0x4d:  /* rex */
+    case 0x4e:  /* rex */
+    case 0x4f:  /* rex */
+    case 0x64:  /* %fs: */
+    case 0x65:  /* %gs: */
+    case 0x66:  /* opcode size */
+    case 0x67:  /* addr size */
+    case 0xf0:  /* lock */
+    case 0xf2:  /* repne */
+    case 0xf3:  /* repe */
+        if (++prefix_count >= 15) return FALSE;
+        continue;
+
+    case 0xdb:
+        if (i == len - 1) return 0;
+        switch (instr[i + 1])
+        {
+        case 0xe1:
+            /* RDSSPD/RDSSPQ: (prefixes) DB E1 */
+            RIP_sig(sigcontext) += prefix_count + 2;
+            TRACE_(seh)( "skipped FNDISI instruction\n" );
+            return TRUE;
+        }
+        break;
+    default:
+        return FALSE;
+    }
+    return FALSE;
+}
+#endif
 
 /***********************************************************************
  *           is_privileged_instr
@@ -2466,7 +2607,14 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
         rec.ExceptionCode = EXCEPTION_ARRAY_BOUNDS_EXCEEDED;
         break;
     case TRAP_x86_PRIVINFLT:   /* Invalid opcode exception */
+#ifdef __APPLE__
+        /* CW HACK 20186 */
+        if (handle_cet_nop( ucontext, &context.c )) return;
+#endif
         rec.ExceptionCode = EXCEPTION_ILLEGAL_INSTRUCTION;
+#ifdef __APPLE__
+	    if (handle_fndisi( ucontext, &context.c )) return;
+#endif
         break;
     case TRAP_x86_STKFLT:  /* Stack fault */
         rec.ExceptionCode = EXCEPTION_STACK_OVERFLOW;
@@ -3117,6 +3265,8 @@ __attribute__((used)) void call_init_thunk( LPTHREAD_START_ROUTINE entry, void *
     __asm__ volatile ("movq %0,%%gs:%c1" :: "r" (teb->Tib.Self), "n" (FIELD_OFFSET(TEB, Tib.Self)));
     __asm__ volatile ("movq %0,%%gs:%c1" :: "r" (teb->ThreadLocalStoragePointer), "n" (FIELD_OFFSET(TEB, ThreadLocalStoragePointer)));
     thread_data->pthread_teb = mac_thread_gsbase();
+    __asm__ volatile (".byte 0x65\n\tmovq %0,%c1" :: "r" (teb->Peb), "n" (FIELD_OFFSET(TEB, Peb)));
+    amd64_thread_data()->pthread_teb = mac_thread_gsbase();
     /* alloc_tls_slot() needs to poke a value to an address relative to each
        thread's gsbase.  Have each thread record its gsbase pointer into its
        TEB so alloc_tls_slot() can find it. */
