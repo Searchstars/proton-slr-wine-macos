@@ -1,0 +1,17 @@
+/Makefile
+/wine
+/wine64
+/TAGS
+/tags
+/autom4te.cache
+/compile_commands.json
+/config.log
+/config.status
+include/config.h
+include/stamp-h
+loader/wine
+.cache
+.DS_Store
+tests/*.exe
+tests/*.o
+log.log
