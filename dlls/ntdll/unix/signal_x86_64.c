@@ -2112,10 +2112,41 @@ static inline BOOL handle_multibyte_nop( ucontext_t *sigcontext, CONTEXT *contex
 #endif
 
 #ifdef __APPLE__
+/* Fake CR8 (Task Priority Register) storage for the current thread */
+static __thread ULONG64 fake_cr8_storage = 0;
+
+/***********************************************************************
+ *           get_gpr_value
+ *           (Helper to read register value from context)
+ */
+static inline ULONG64 get_gpr_value( CONTEXT *context, unsigned int reg )
+{
+    switch (reg)
+    {
+    case 0:  return context->Rax;
+    case 1:  return context->Rcx;
+    case 2:  return context->Rdx;
+    case 3:  return context->Rbx;
+    case 4:  return context->Rsp;
+    case 5:  return context->Rbp;
+    case 6:  return context->Rsi;
+    case 7:  return context->Rdi;
+    case 8:  return context->R8;
+    case 9:  return context->R9;
+    case 10: return context->R10;
+    case 11: return context->R11;
+    case 12: return context->R12;
+    case 13: return context->R13;
+    case 14: return context->R14;
+    case 15: return context->R15;
+    default: return 0;
+    }
+}
+
 /***********************************************************************
  *           handle_rosetta_mov_cr
  *
- * Emulate MOV r64, CRx (0F 20 /r) in user mode under Rosetta 2.
+ * Emulate MOV r64, CRx (0F 20 /r) AND MOV CRx, r64 (0F 22 /r)
  */
 static inline BOOL handle_rosetta_mov_cr( ucontext_t *sigcontext, CONTEXT *context )
 {
@@ -2127,54 +2158,65 @@ static inline BOOL handle_rosetta_mov_cr( ucontext_t *sigcontext, CONTEXT *conte
     for (i = 0; i < len; i++) switch (instr[i])
     {
     /* instruction prefixes */
-    case 0x2e:  /* %cs: */
-    case 0x36:  /* %ss: */
-    case 0x3e:  /* %ds: */
-    case 0x26:  /* %es: */
-    case 0x64:  /* %fs: */
-    case 0x65:  /* %gs: */
-    case 0x66:  /* opcode size */
-    case 0x67:  /* addr size */
-    case 0xf0:  /* lock */
-    case 0xf2:  /* repne */
-    case 0xf3:  /* repe */
+    case 0x2e: case 0x36: case 0x3e: case 0x26:
+    case 0x64: case 0x65: case 0x66: case 0x67:
+    case 0xf0: case 0xf2: case 0xf3:
         if (++prefix_count >= 15) return FALSE;
         continue;
-    case 0x40:  /* rex */
-    case 0x41:
-    case 0x42:
-    case 0x43:
-    case 0x44:
-    case 0x45:
-    case 0x46:
-    case 0x47:
-    case 0x48:
-    case 0x49:
-    case 0x4a:
-    case 0x4b:
-    case 0x4c:
-    case 0x4d:
-    case 0x4e:
-    case 0x4f:
+    case 0x40: case 0x41: case 0x42: case 0x43:
+    case 0x44: case 0x45: case 0x46: case 0x47:
+    case 0x48: case 0x49: case 0x4a: case 0x4b:
+    case 0x4c: case 0x4d: case 0x4e: case 0x4f:
         rex = instr[i];
         if (++prefix_count >= 15) return FALSE;
         continue;
     case 0x0f:
         if (i + 2 >= len) return FALSE;
-        if (instr[i + 1] != 0x20) return FALSE;
+        /* MOV Rd, CRx (Read Control Register) */
+        if (instr[i + 1] == 0x20)
         {
             BYTE modrm = instr[i + 2];
-            BYTE mod = MODRM_MOD(modrm);
-            BYTE reg = MODRM_REG(modrm) | ((rex & 0x4) ? 8 : 0);
-            BYTE rm  = MODRM_RM(modrm)  | ((rex & 0x1) ? 8 : 0);
+            BYTE mod = modrm >> 6;
+            BYTE reg = ((modrm >> 3) & 7) | ((rex & 0x4) ? 8 : 0);
+            BYTE rm  = (modrm & 7) | ((rex & 0x1) ? 8 : 0);
             ULONG64 value;
 
             if (mod != 3) return FALSE;
-            value = fake_control_register( reg );
+
+            /* Special handling for CR8 (TP) */
+            if (reg == 8) value = fake_cr8_storage;
+            else value = fake_control_register( reg );
+
             set_gpr_value( sigcontext, context, rm, value );
             RIP_sig(sigcontext) += prefix_count + 3;
             context->Rip += prefix_count + 3;
-            TRACE_(seh)( "emulated MOV r%u, CR%u => %#lx\n", rm, reg, value );
+            TRACE_(seh)( "emulated MOV r%u, CR%u => %#llx\n", rm, reg, value );
+            return TRUE;
+        }
+        /* MOV CRx, Rd (Write Control Register) */
+        else if (instr[i + 1] == 0x22)
+        {
+            BYTE modrm = instr[i + 2];
+            BYTE mod = modrm >> 6;
+            BYTE reg = ((modrm >> 3) & 7) | ((rex & 0x4) ? 8 : 0);
+            BYTE rm  = (modrm & 7) | ((rex & 0x1) ? 8 : 0);
+            ULONG64 value = get_gpr_value( context, rm );
+
+            if (mod != 3) return FALSE;
+
+            /* We allow writing to our fake CR8 */
+            if (reg == 8)
+            {
+                fake_cr8_storage = value;
+                TRACE_(seh)( "emulated MOV CR8, r%u (val=%#llx)\n", rm, value );
+            }
+            else
+            {
+                TRACE_(seh)( "emulated (ignored) MOV CR%u, r%u (val=%#llx)\n", reg, rm, value );
+            }
+
+            RIP_sig(sigcontext) += prefix_count + 3;
+            context->Rip += prefix_count + 3;
             return TRUE;
         }
         break;
