@@ -1942,7 +1942,56 @@ static inline BOOL handle_fndisi( ucontext_t *sigcontext, CONTEXT *context )
 
 #ifdef __APPLE__
 /***********************************************************************
- *           handle_multibyte_nop
+ *           set_gpr_value
+ */
+static inline void set_gpr_value( ucontext_t *sigcontext, CONTEXT *context, unsigned int reg, ULONG64 value )
+{
+    switch (reg)
+    {
+    case 0:  context->Rax = value; RAX_sig(sigcontext) = value; break;
+    case 1:  context->Rcx = value; RCX_sig(sigcontext) = value; break;
+    case 2:  context->Rdx = value; RDX_sig(sigcontext) = value; break;
+    case 3:  context->Rbx = value; RBX_sig(sigcontext) = value; break;
+    case 4:  context->Rsp = value; RSP_sig(sigcontext) = value; break;
+    case 5:  context->Rbp = value; RBP_sig(sigcontext) = value; break;
+    case 6:  context->Rsi = value; RSI_sig(sigcontext) = value; break;
+    case 7:  context->Rdi = value; RDI_sig(sigcontext) = value; break;
+    case 8:  context->R8  = value; R8_sig(sigcontext)  = value; break;
+    case 9:  context->R9  = value; R9_sig(sigcontext)  = value; break;
+    case 10: context->R10 = value; R10_sig(sigcontext) = value; break;
+    case 11: context->R11 = value; R11_sig(sigcontext) = value; break;
+    case 12: context->R12 = value; R12_sig(sigcontext) = value; break;
+    case 13: context->R13 = value; R13_sig(sigcontext) = value; break;
+    case 14: context->R14 = value; R14_sig(sigcontext) = value; break;
+    case 15: context->R15 = value; R15_sig(sigcontext) = value; break;
+    default: break;
+    }
+}
+
+/***********************************************************************
+ *           fake_control_register
+ */
+static inline ULONG64 fake_control_register( unsigned int cr )
+{
+    switch (cr)
+    {
+    case 0: return 0x80050033ull; /* PE|MP|NE|WP|PG, reasonable defaults */
+    case 2: return 0;             /* no faulting address */
+    case 3:
+    {
+        ULONG64 teb = (ULONG64)NtCurrentTeb();
+        return teb & ~0xfffull;
+    }
+    case 4: return 0x000006f0ull; /* PAE|PGE|OSFXSR|OSXMMEXCPT */
+    case 8: return 0;
+    default: return 0;
+    }
+}
+#endif
+
+#ifdef __APPLE__
+/***********************************************************************
+ *           handle_rosetta_multibyte_nop
  *
  * Check whether the fault location should be considered a multi-byte NOP
  */
@@ -2040,6 +2089,80 @@ static inline BOOL handle_multibyte_nop( ucontext_t *sigcontext, CONTEXT *contex
         }
 
         return FALSE;
+        break;
+    default:
+        return FALSE;
+    }
+    return FALSE;
+}
+#endif
+
+#ifdef __APPLE__
+/***********************************************************************
+ *           handle_rosetta_mov_cr
+ *
+ * Emulate MOV r64, CRx (0F 20 /r) in user mode under Rosetta 2.
+ */
+static inline BOOL handle_rosetta_mov_cr( ucontext_t *sigcontext, CONTEXT *context )
+{
+    BYTE instr[16];
+    unsigned int i, prefix_count = 0;
+    BYTE rex = 0;
+    unsigned int len = virtual_uninterrupted_read_memory( (BYTE *)context->Rip, instr, sizeof(instr) );
+
+    for (i = 0; i < len; i++) switch (instr[i])
+    {
+    /* instruction prefixes */
+    case 0x2e:  /* %cs: */
+    case 0x36:  /* %ss: */
+    case 0x3e:  /* %ds: */
+    case 0x26:  /* %es: */
+    case 0x64:  /* %fs: */
+    case 0x65:  /* %gs: */
+    case 0x66:  /* opcode size */
+    case 0x67:  /* addr size */
+    case 0xf0:  /* lock */
+    case 0xf2:  /* repne */
+    case 0xf3:  /* repe */
+        if (++prefix_count >= 15) return FALSE;
+        continue;
+    case 0x40:  /* rex */
+    case 0x41:
+    case 0x42:
+    case 0x43:
+    case 0x44:
+    case 0x45:
+    case 0x46:
+    case 0x47:
+    case 0x48:
+    case 0x49:
+    case 0x4a:
+    case 0x4b:
+    case 0x4c:
+    case 0x4d:
+    case 0x4e:
+    case 0x4f:
+        rex = instr[i];
+        if (++prefix_count >= 15) return FALSE;
+        continue;
+    case 0x0f:
+        if (i + 2 >= len) return FALSE;
+        if (instr[i + 1] != 0x20) return FALSE;
+        {
+            BYTE modrm = instr[i + 2];
+            BYTE mod = modrm >> 6;
+            BYTE reg = ((modrm >> 3) & 7) | ((rex & 0x4) ? 8 : 0);
+            BYTE rm  = (modrm & 7) | ((rex & 0x1) ? 8 : 0);
+            ULONG64 value;
+
+            if (mod != 3) return FALSE;
+            value = fake_control_register( reg );
+            set_gpr_value( sigcontext, context, rm, value );
+            RIP_sig(sigcontext) += prefix_count + 3;
+            context->Rip += prefix_count + 3;
+            TRACE_(seh)( "emulated MOV r%u, CR%u => %#llx\n", rm, reg, value );
+            return TRUE;
+        }
         break;
     default:
         return FALSE;
@@ -2723,6 +2846,7 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
 #ifdef __APPLE__
 	    if (handle_fndisi( ucontext, &context.c )) return;
         if (handle_multibyte_nop( ucontext, &context.c )) return;
+        if (handle_rosetta_mov_cr( ucontext, &context.c )) return;
 #endif
         break;
     case TRAP_x86_STKFLT:  /* Stack fault */
@@ -2732,6 +2856,9 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
     case TRAP_x86_PROTFLT:   /* General protection fault */
         {
             WORD err = ERROR_sig(ucontext);
+#ifdef __APPLE__
+            if (handle_rosetta_mov_cr( ucontext, &context.c )) return;
+#endif
             if (!err && (rec.ExceptionCode = is_privileged_instr( &context.c ))) break;
             if ((err & 7) == 2 && handle_interrupt( ucontext, &rec, &context )) return;
             rec.ExceptionCode = EXCEPTION_ACCESS_VIOLATION;
