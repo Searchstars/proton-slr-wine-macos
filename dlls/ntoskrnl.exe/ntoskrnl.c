@@ -2735,6 +2735,28 @@ HANDLE WINAPI PsGetThreadProcessId( PETHREAD thread )
 }
 
 /*********************************************************************
+ *           PsGetProcessExitStatus    (NTOSKRNL.@)
+ */
+NTSTATUS WINAPI PsGetProcessExitStatus( PEPROCESS process )
+{
+    TRACE( "%p\n", process );
+    if (!process) return STATUS_INVALID_PARAMETER;
+
+    return process->info.ExitStatus;
+}
+
+/*********************************************************************
+ *           PsGetProcessExitProcessCalled    (NTOSKRNL.@)
+ */
+BOOLEAN WINAPI PsGetProcessExitProcessCalled( PEPROCESS process )
+{
+    TRACE( "%p\n", process );
+    if (!process) return FALSE;
+
+    return process->info.ExitStatus != STATUS_PENDING;
+}
+
+/*********************************************************************
  *           PsGetContextThread    (NTOSKRNL.@)
  */
 NTSTATUS WINAPI PsGetContextThread(PETHREAD thread, CONTEXT *context)

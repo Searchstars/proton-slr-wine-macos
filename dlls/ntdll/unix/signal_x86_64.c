@@ -1980,6 +1980,26 @@ static inline void set_gpr_value( ucontext_t *sigcontext, CONTEXT *context, unsi
 }
 
 /***********************************************************************
+ *           set_rax_low
+ */
+static inline void set_rax_low( ucontext_t *sigcontext, CONTEXT *context, unsigned int size, ULONG64 value )
+{
+    switch (size)
+    {
+    case 1:
+        context->Rax = (context->Rax & ~0xffull) | (value & 0xffull);
+        break;
+    case 2:
+        context->Rax = (context->Rax & ~0xffffull) | (value & 0xffffull);
+        break;
+    default: /* 4 */
+        context->Rax = (ULONG64)(value & 0xffffffffull);
+        break;
+    }
+    RAX_sig(sigcontext) = context->Rax;
+}
+
+/***********************************************************************
  *           fake_control_register
  */
 static inline ULONG64 fake_control_register( unsigned int cr )
@@ -2158,6 +2178,124 @@ static inline BOOL handle_rosetta_mov_cr( ucontext_t *sigcontext, CONTEXT *conte
             return TRUE;
         }
         break;
+    default:
+        return FALSE;
+    }
+    return FALSE;
+}
+#endif
+
+#ifdef __APPLE__
+/***********************************************************************
+ *           dump_io_instr
+ */
+static inline void dump_io_instr( const BYTE *instr, unsigned int len, void *ip )
+{
+    char line[3 * 16 + 1];
+    unsigned int i;
+    char *p = line;
+
+    if (len > 16) len = 16;
+    for (i = 0; i < len; i++) p += sprintf( p, "%02x ", instr[i] );
+    *p = 0;
+    WARN_(seh)( "io-port instr %p: %s\n", ip, line );
+}
+
+/***********************************************************************
+ *           handle_rosetta_io_port
+ *
+ * Emulate IN/OUT instructions in user mode under Rosetta 2.
+ */
+static inline BOOL handle_rosetta_io_port( ucontext_t *sigcontext, CONTEXT *context )
+{
+    BYTE instr[16];
+    unsigned int i, prefix_count = 0;
+    unsigned int len = virtual_uninterrupted_read_memory( (BYTE *)context->Rip, instr, sizeof(instr) );
+    unsigned int opsize = 4;
+    WORD port;
+
+    for (i = 0; i < len; i++) switch (instr[i])
+    {
+    /* instruction prefixes */
+    case 0x2e:  /* %cs: */
+    case 0x36:  /* %ss: */
+    case 0x3e:  /* %ds: */
+    case 0x26:  /* %es: */
+    case 0x64:  /* %fs: */
+    case 0x65:  /* %gs: */
+    case 0x67:  /* addr size */
+    case 0xf0:  /* lock */
+    case 0xf2:  /* repne */
+    case 0xf3:  /* repe */
+        if (++prefix_count >= 15) return FALSE;
+        continue;
+    case 0x66:  /* operand size */
+        opsize = 2;
+        if (++prefix_count >= 15) return FALSE;
+        continue;
+    case 0x40:  /* rex */
+    case 0x41:
+    case 0x42:
+    case 0x43:
+    case 0x44:
+    case 0x45:
+    case 0x46:
+    case 0x47:
+    case 0x48:
+    case 0x49:
+    case 0x4a:
+    case 0x4b:
+    case 0x4c:
+    case 0x4d:
+    case 0x4e:
+    case 0x4f:
+        if (++prefix_count >= 15) return FALSE;
+        continue;
+
+    case 0xe4: /* in al, imm8 */
+    case 0xe5: /* in eax, imm8 */
+        if (i + 1 >= len) return FALSE;
+        port = instr[i + 1];
+        if (instr[i] == 0xe4) opsize = 1;
+        dump_io_instr( instr, len, (void *)context->Rip );
+        set_rax_low( sigcontext, context, opsize, 0 );
+        RIP_sig(sigcontext) += prefix_count + 2;
+        context->Rip += prefix_count + 2;
+        TRACE_(seh)( "emulated IN port %#x size %u\n", port, opsize );
+        return TRUE;
+
+    case 0xe6: /* out imm8, al */
+    case 0xe7: /* out imm8, eax */
+        if (i + 1 >= len) return FALSE;
+        port = instr[i + 1];
+        if (instr[i] == 0xe6) opsize = 1;
+        dump_io_instr( instr, len, (void *)context->Rip );
+        RIP_sig(sigcontext) += prefix_count + 2;
+        context->Rip += prefix_count + 2;
+        TRACE_(seh)( "emulated OUT port %#x size %u\n", port, opsize );
+        return TRUE;
+
+    case 0xec: /* in al, dx */
+    case 0xed: /* in eax, dx */
+        port = (WORD)context->Rdx;
+        if (instr[i] == 0xec) opsize = 1;
+        dump_io_instr( instr, len, (void *)context->Rip );
+        set_rax_low( sigcontext, context, opsize, 0 );
+        RIP_sig(sigcontext) += prefix_count + 1;
+        context->Rip += prefix_count + 1;
+        TRACE_(seh)( "emulated IN port %#x size %u\n", port, opsize );
+        return TRUE;
+
+    case 0xee: /* out dx, al */
+    case 0xef: /* out dx, eax */
+        port = (WORD)context->Rdx;
+        if (instr[i] == 0xee) opsize = 1;
+        dump_io_instr( instr, len, (void *)context->Rip );
+        RIP_sig(sigcontext) += prefix_count + 1;
+        context->Rip += prefix_count + 1;
+        TRACE_(seh)( "emulated OUT port %#x size %u\n", port, opsize );
+        return TRUE;
+
     default:
         return FALSE;
     }
@@ -2840,6 +2978,7 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
 #ifdef __APPLE__
 	    if (handle_fndisi( ucontext, &context.c )) return;
         if (handle_multibyte_nop( ucontext, &context.c )) return;
+        if (handle_rosetta_io_port( ucontext, &context.c )) return;
         if (handle_rosetta_mov_cr( ucontext, &context.c )) return;
 #endif
         break;
@@ -2851,6 +2990,7 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
         {
             WORD err = ERROR_sig(ucontext);
 #ifdef __APPLE__
+            if (handle_rosetta_io_port( ucontext, &context.c )) return;
             if (handle_rosetta_mov_cr( ucontext, &context.c )) return;
 #endif
             if (!err && (rec.ExceptionCode = is_privileged_instr( &context.c ))) break;
