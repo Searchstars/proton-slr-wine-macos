@@ -94,6 +94,17 @@ WINE_DEFAULT_DEBUG_CHANNEL(virtual);
 WINE_DECLARE_DEBUG_CHANNEL(module);
 WINE_DECLARE_DEBUG_CHANNEL(virtual_ranges);
 WINE_DECLARE_DEBUG_CHANNEL(virtstat);
+WINE_DECLARE_DEBUG_CHANNEL(seh);
+
+#ifdef __APPLE__
+#define NATIVE_SYSCALL_ADDRESS_START 0x700000000000ULL
+static void patch_syscall_traps_range( BYTE *base, SIZE_T size );
+static inline void flush_icache_range( void *start, SIZE_T size )
+{
+    /* Ensure patched instructions are visible to the CPU (Rosetta/ARM64). */
+    __builtin___clear_cache( (char *)start, (char *)start + size );
+}
+#endif
 
 /* Gdb integration, in loader/main.c */
 static struct r_debug *wine_r_debug;
@@ -2185,6 +2196,16 @@ static void *wine_mmap(void *addr, size_t len, int prot, int flags, int fd, off_
  */
 static BOOL set_vprot( struct file_view *view, void *base, size_t size, BYTE vprot )
 {
+#ifdef __APPLE__
+    if (!(view->protect & VPROT_NATIVE) && (vprot & VPROT_EXEC) &&
+        (ULONG_PTR)base < NATIVE_SYSCALL_ADDRESS_START)
+    {
+        /* Patch freshly-executable pages while they are still writable. */
+        if (get_page_vprot( base ) & VPROT_WRITE)
+            patch_syscall_traps_range( base, size );
+    }
+#endif
+
     if (!use_kernel_writewatch && view->protect & VPROT_WRITEWATCH)
     {
         /* each page may need different protections depending on write watch flag */
@@ -3316,6 +3337,177 @@ static IMAGE_BASE_RELOCATION *process_relocation_block( char *page, IMAGE_BASE_R
  * Map an executable (PE format) image into an existing view.
  * virtual_mutex must be held by caller.
  */
+#ifdef __APPLE__
+static BOOL is_syscall_instr( const BYTE *ptr, SIZE_T size, SIZE_T offset )
+{
+    if (offset + 1 >= size) return FALSE;
+    if (ptr[offset] != 0x0f || ptr[offset + 1] != 0x05) return FALSE;
+    return TRUE;
+}
+
+static BOOL is_syscall_stub( const BYTE *ptr, SIZE_T size, SIZE_T offset )
+{
+    if (offset + 2 >= size) return FALSE;
+    if (ptr[offset] != 0x0f || ptr[offset + 1] != 0x05) return FALSE;
+    if (ptr[offset + 2] != 0xc3) return FALSE; /* require syscall; ret */
+
+    /* Full Windows-style stub used by Wine (test+jne before syscall). */
+    if (offset >= 18 &&
+        ptr[offset - 18] == 0x4c && ptr[offset - 17] == 0x8b && ptr[offset - 16] == 0xd1 &&
+        ptr[offset - 15] == 0xb8 &&
+        ptr[offset - 10] == 0xf6 && ptr[offset - 9]  == 0x04 && ptr[offset - 8]  == 0x25 &&
+        ptr[offset - 7]  == 0x08 && ptr[offset - 6]  == 0x03 && ptr[offset - 5]  == 0xfe &&
+        ptr[offset - 4]  == 0x7f && ptr[offset - 3]  == 0x01 &&
+        ptr[offset - 2]  == 0x75 && ptr[offset - 1]  == 0x03)
+        return TRUE;
+
+    /* Minimal stub: mov r10,rcx; mov eax,imm32; syscall; ret. */
+    if (offset >= 8 &&
+        ptr[offset - 8] == 0x4c && ptr[offset - 7] == 0x8b &&
+        ptr[offset - 6] == 0xd1 && ptr[offset - 5] == 0xb8)
+        return TRUE;
+
+    /* ACE stub: mov eax,[rsp+0x18]; mov r9,[rsp+0x20]; mov r10,rcx; syscall; ret. */
+    if (offset >= 12 &&
+        ptr[offset - 12] == 0x8b && ptr[offset - 11] == 0x44 &&
+        ptr[offset - 10] == 0x24 && ptr[offset - 9]  == 0x18 &&
+        ptr[offset - 8]  == 0x4c && ptr[offset - 7]  == 0x8b &&
+        ptr[offset - 6]  == 0x4c && ptr[offset - 5]  == 0x24 &&
+        ptr[offset - 4]  == 0x20 &&
+        ptr[offset - 3]  == 0x4c && ptr[offset - 2]  == 0x8b &&
+        ptr[offset - 1]  == 0xd1)
+        return TRUE;
+
+    /* Generic: syscall; ret with mov r10,rcx in the preceding bytes. */
+    {
+        SIZE_T start = (offset > 16) ? offset - 16 : 0;
+        SIZE_T k;
+        for (k = start; k + 2 < offset; k++)
+            if (ptr[k] == 0x4c && ptr[k + 1] == 0x8b && ptr[k + 2] == 0xd1)
+                return TRUE;
+    }
+
+    return FALSE;
+}
+
+static void patch_syscall_traps_range( BYTE *base, SIZE_T size )
+{
+    ULONG_PTR *addrs = NULL;
+    size_t addr_count = 0, addr_cap = 0;
+    SIZE_T patch_first = ~(SIZE_T)0;
+    SIZE_T patch_last = 0;
+    SIZE_T i;
+
+    for (i = 0; i + 1 < size; i++)
+    {
+        if (!is_syscall_instr( base, size, i )) continue;
+        {
+            BYTE b0 = base[i];
+            BYTE b1 = base[i + 1];
+            BYTE b2 = base[i + 2];
+            BYTE b3 = (i + 3 < size) ? base[i + 3] : 0;
+            BYTE b4 = (i + 4 < size) ? base[i + 4] : 0;
+            if (is_syscall_stub( base, size, i ))
+                WARN_(seh)( "patching syscall stub at %p bytes %02x %02x %02x %02x %02x\n",
+                            base + i, b0, b1, b2, b3, b4 );
+            else
+                WARN_(seh)( "patching syscall instr at %p bytes %02x %02x %02x %02x %02x\n",
+                            base + i, b0, b1, b2, b3, b4 );
+        }
+        base[i + 1] = 0x0b; /* syscall -> ud2 */
+        if (patch_first == ~(SIZE_T)0) patch_first = i;
+        if (patch_last < i + 2) patch_last = i + 2;
+
+        if (addr_count == addr_cap)
+        {
+            size_t new_cap = addr_cap ? addr_cap * 2 : 64;
+            ULONG_PTR *new_addrs = realloc( addrs, new_cap * sizeof(*addrs) );
+            if (!new_addrs) goto out;
+            addrs = new_addrs;
+            addr_cap = new_cap;
+        }
+        addrs[addr_count++] = (ULONG_PTR)(base + i);
+    }
+
+out:
+    if (patch_first != ~(SIZE_T)0)
+        flush_icache_range( base + patch_first, patch_last - patch_first );
+    if (addr_count) register_syscall_traps( addrs, addr_count );
+    free( addrs );
+}
+
+static void patch_syscall_traps( char *base, SIZE_T total_size, const IMAGE_NT_HEADERS *nt,
+                                 const IMAGE_SECTION_HEADER *sections, unsigned int count,
+                                 const struct pe_image_info *image_info )
+{
+    ULONG_PTR *addrs = NULL;
+    size_t addr_count = 0, addr_cap = 0;
+    unsigned int i;
+
+    if (!image_info->contains_code) return;
+    if (nt->FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64) return;
+
+    for (i = 0; i < count; i++)
+    {
+        const IMAGE_SECTION_HEADER *sec = &sections[i];
+        SIZE_T sec_size;
+        BYTE *ptr;
+        SIZE_T patch_first = ~(SIZE_T)0;
+        SIZE_T patch_last = 0;
+        SIZE_T j;
+
+        if (!(sec->Characteristics & IMAGE_SCN_MEM_EXECUTE)) continue;
+        sec_size = sec->Misc.VirtualSize ? sec->Misc.VirtualSize : sec->SizeOfRawData;
+        if (!sec_size) continue;
+        if (sec->VirtualAddress >= total_size) continue;
+        if (sec->VirtualAddress + sec_size > total_size) sec_size = total_size - sec->VirtualAddress;
+
+        ptr = (BYTE *)base + sec->VirtualAddress;
+        for (j = 0; j + 1 < sec_size; j++)
+        {
+            if (!is_syscall_instr( ptr, sec_size, j )) continue;
+            {
+                BYTE b0 = ptr[j];
+                BYTE b1 = ptr[j + 1];
+                BYTE b2 = ptr[j + 2];
+                BYTE b3 = (j + 3 < sec_size) ? ptr[j + 3] : 0;
+                BYTE b4 = (j + 4 < sec_size) ? ptr[j + 4] : 0;
+                if (is_syscall_stub( ptr, sec_size, j ))
+                    WARN_(seh)( "patching syscall stub at %p bytes %02x %02x %02x %02x %02x\n",
+                                base + sec->VirtualAddress + j, b0, b1, b2, b3, b4 );
+                else
+                    WARN_(seh)( "patching syscall instr at %p bytes %02x %02x %02x %02x %02x\n",
+                                base + sec->VirtualAddress + j, b0, b1, b2, b3, b4 );
+            }
+            ptr[j + 1] = 0x0b; /* syscall -> ud2 */
+            if (patch_first == ~(SIZE_T)0) patch_first = j;
+            if (patch_last < j + 2) patch_last = j + 2;
+
+            if (addr_count == addr_cap)
+            {
+                size_t new_cap = addr_cap ? addr_cap * 2 : 64;
+                ULONG_PTR *new_addrs = realloc( addrs, new_cap * sizeof(*addrs) );
+                if (!new_addrs)
+                {
+                    if (patch_first != ~(SIZE_T)0)
+                        flush_icache_range( ptr + patch_first, patch_last - patch_first );
+                    goto out;
+                }
+                addrs = new_addrs;
+                addr_cap = new_cap;
+            }
+            addrs[addr_count++] = (ULONG_PTR)(base + sec->VirtualAddress + j);
+        }
+        if (patch_first != ~(SIZE_T)0)
+            flush_icache_range( ptr + patch_first, patch_last - patch_first );
+    }
+
+out:
+    if (addr_count) register_syscall_traps( addrs, addr_count );
+    free( addrs );
+}
+#endif
+
 static NTSTATUS map_image_into_view( struct file_view *view, const WCHAR *filename, int fd,
                                      struct pe_image_info *image_info, USHORT machine,
                                      int shared_fd, BOOL removable )
@@ -3512,6 +3704,10 @@ static NTSTATUS map_image_into_view( struct file_view *view, const WCHAR *filena
                 rel = process_relocation_block( ptr + rel->VirtualAddress, rel, delta );
         }
     }
+
+#ifdef __APPLE__
+    patch_syscall_traps( ptr, total_size, nt, sections, nt->FileHeader.NumberOfSections, image_info );
+#endif
 
     /* set the image protections */
 
@@ -7096,6 +7292,9 @@ NTSTATUS WINAPI NtReadVirtualMemory( HANDLE process, const void *addr, void *buf
             size = 0;
         }
         __ENDTRY
+#ifdef __APPLE__
+        if (status == STATUS_SUCCESS && size) syscall_trap_fixup_read( (ULONG_PTR)addr, buffer, size );
+#endif
         if (bytes_read) *bytes_read = size;
         return status;
     }
@@ -7157,6 +7356,9 @@ done:
             size = 0;
         }
         __ENDTRY
+#ifdef __APPLE__
+        if (status == STATUS_SUCCESS && size) syscall_trap_fixup_read( (ULONG_PTR)addr, buffer, size );
+#endif
     }
     else
     {

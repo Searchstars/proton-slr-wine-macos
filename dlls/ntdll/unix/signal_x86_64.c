@@ -91,6 +91,101 @@ WINE_DECLARE_DEBUG_CHANNEL(seh);
 
 #include "dwarf.h"
 
+#ifdef __APPLE__
+struct syscall_trap_set
+{
+    size_t     count;
+    size_t     capacity;
+    ULONG_PTR  addrs[1];
+};
+
+static struct syscall_trap_set *syscall_trap_set;
+
+static int compare_ulongptr( const void *a, const void *b )
+{
+    const ULONG_PTR va = *(const ULONG_PTR *)a;
+    const ULONG_PTR vb = *(const ULONG_PTR *)b;
+    return (va > vb) - (va < vb);
+}
+
+BOOL is_syscall_trap_addr( ULONG_PTR addr )
+{
+    struct syscall_trap_set *set = __atomic_load_n( &syscall_trap_set, __ATOMIC_ACQUIRE );
+    size_t lo, hi;
+
+    if (!set || !set->count) return FALSE;
+    lo = 0;
+    hi = set->count;
+    while (lo < hi)
+    {
+        size_t mid = (lo + hi) / 2;
+        ULONG_PTR cur = set->addrs[mid];
+        if (addr < cur) hi = mid;
+        else if (addr > cur) lo = mid + 1;
+        else return TRUE;
+    }
+    return FALSE;
+}
+
+void syscall_trap_fixup_read( ULONG_PTR addr, void *buffer, SIZE_T size )
+{
+    struct syscall_trap_set *set = __atomic_load_n( &syscall_trap_set, __ATOMIC_ACQUIRE );
+    ULONG_PTR start = addr;
+    ULONG_PTR end = addr + size;
+    ULONG_PTR search;
+    BYTE *buf = buffer;
+    size_t lo, hi, i;
+
+    if (!set || !set->count || !size) return;
+    if (end < start) end = ~(ULONG_PTR)0; /* overflow */
+    search = start ? start - 1 : start;   /* include trap just before range */
+
+    lo = 0;
+    hi = set->count;
+    while (lo < hi)
+    {
+        size_t mid = (lo + hi) / 2;
+        ULONG_PTR cur = set->addrs[mid];
+        if (cur < search) lo = mid + 1;
+        else hi = mid;
+    }
+
+    for (i = lo; i < set->count; i++)
+    {
+        ULONG_PTR trap = set->addrs[i];
+        if (trap >= end) break;
+
+        if (trap >= start) buf[trap - start] = 0x0f;
+        if (trap + 1 >= start && trap + 1 < end) buf[trap + 1 - start] = 0x05;
+    }
+}
+
+static void setup_syscall_dispatch( ucontext_t *ucontext, ULONG_PTR rip );
+
+void register_syscall_traps( const ULONG_PTR *addrs, size_t count )
+{
+    struct syscall_trap_set *old_set, *new_set;
+    size_t old_count;
+
+    if (!count) return;
+
+    old_set = __atomic_load_n( &syscall_trap_set, __ATOMIC_ACQUIRE );
+    old_count = old_set ? old_set->count : 0;
+    new_set = malloc( sizeof(*new_set) + (old_count + count) * sizeof(ULONG_PTR) );
+    if (!new_set) return;
+
+    new_set->count = old_count + count;
+    new_set->capacity = new_set->count;
+    if (old_count) memcpy( new_set->addrs, old_set->addrs, old_count * sizeof(ULONG_PTR) );
+    memcpy( new_set->addrs + old_count, addrs, count * sizeof(ULONG_PTR) );
+    qsort( new_set->addrs, new_set->count, sizeof(ULONG_PTR), compare_ulongptr );
+
+    /* Swap pointer atomically; keep old set allocated for signal safety. */
+    __atomic_store_n( &syscall_trap_set, new_set, __ATOMIC_RELEASE );
+    TRACE_(seh)( "Registered %zu syscall traps (total %zu).\n", count, new_set->count );
+}
+#endif
+
 /* scable-index-base bits */
 #define SIB_S(b)        ( ( b ) >> 6 )
 #define SIB_I(b)        ( ( ( b ) >> 3 ) & 7 )
@@ -2431,6 +2526,45 @@ static inline DWORD is_privileged_instr( CONTEXT *context )
     return 0;
 }
 
+#ifdef __APPLE__
+static void setup_syscall_dispatch( ucontext_t *ucontext, ULONG_PTR rip )
+{
+    extern const void *__wine_syscall_dispatcher_prolog_end_ptr;
+    struct syscall_frame *frame = amd64_thread_data()->syscall_frame;
+
+    frame->rip = rip + 0xb;
+    frame->rcx = rip;
+    frame->eflags = EFL_sig(ucontext);
+    frame->restore_flags = 0;
+    if (instrumentation_callback) frame->restore_flags |= RESTORE_FLAGS_INSTRUMENTATION;
+    RCX_sig(ucontext) = (ULONG_PTR)frame;
+    R11_sig(ucontext) = frame->eflags;
+    if (EFL_sig(ucontext) & 0x100)
+    {
+        EFL_sig(ucontext) &= ~0x100;  /* clear single-step flag */
+        frame->restore_flags |= CONTEXT_CONTROL;
+    }
+    RIP_sig(ucontext) = (ULONG64)__wine_syscall_dispatcher_prolog_end_ptr;
+}
+
+static inline BOOL handle_syscall_ud2( ucontext_t *ucontext, CONTEXT *context )
+{
+    BYTE instr[2];
+    ULONG_PTR rip = RIP_sig(ucontext);
+
+    if (!is_syscall_trap_addr( rip )) return FALSE;
+    if (virtual_uninterrupted_read_memory( (BYTE *)rip, instr, sizeof(instr) ) != sizeof(instr)) return FALSE;
+    if (instr[0] != 0x0f || instr[1] != 0x0b) return FALSE;
+
+    TRACE_(seh)( "UD2 syscall trap at rip %#lx rax %#llx.\n", rip, RAX_sig(ucontext) );
+
+    /* Emulate seccomp SIGSYS handling for patched syscalls. */
+    setup_syscall_dispatch( ucontext, rip );
+    return TRUE;
+}
+
+#endif
+
 #ifdef HAVE_SECCOMP
 static void sigsys_handler( int signal, siginfo_t *siginfo, void *sigcontext )
 {
@@ -2998,6 +3132,8 @@ static BOOL handle_syscall_trap( ucontext_t *sigcontext, siginfo_t *siginfo )
  *
  * Handler for SIGSEGV and related errors.
  */
+static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext );
+
 static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
 {
     EXCEPTION_RECORD rec = { 0 };
@@ -3203,6 +3339,23 @@ static void int_handler( int signal, siginfo_t *siginfo, void *sigcontext )
             NtClose( handle );
     }
     leave_handler( ucontext );
+}
+
+/**********************************************************************
+ *		sigill_handler
+ *
+ * Handler for SIGILL; used to intercept UD2 syscall traps.
+ */
+static void sigill_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+{
+    ucontext_t *ucontext = init_handler( sigcontext );
+    struct xcontext context;
+
+    save_context( &context, ucontext );
+#ifdef __APPLE__
+    if (handle_syscall_ud2( ucontext, &context.c )) return;
+#endif
+    segv_handler( signal, siginfo, sigcontext );
 }
 
 
@@ -3619,7 +3772,9 @@ void signal_init_process(void)
     if (sigaction( SIGTRAP, &sig_act, NULL ) == -1) goto error;
     sig_act.sa_sigaction = segv_handler;
     if (sigaction( SIGSEGV, &sig_act, NULL ) == -1) goto error;
+    sig_act.sa_sigaction = sigill_handler;
     if (sigaction( SIGILL, &sig_act, NULL ) == -1) goto error;
+    sig_act.sa_sigaction = segv_handler;
     if (sigaction( SIGBUS, &sig_act, NULL ) == -1) goto error;
 #ifdef __APPLE__
     sig_act.sa_sigaction = sigsys_handler;
