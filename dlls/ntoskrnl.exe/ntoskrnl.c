@@ -28,6 +28,7 @@
 #include "winreg.h"
 #include "ntsecapi.h"
 #include "evntprov.h"
+#include "wine/exception.h"
 #include "ddk/csq.h"
 #include "wine/server.h"
 #include "wine/heap.h"
@@ -53,6 +54,16 @@ typedef struct _KSERVICE_TABLE_DESCRIPTOR
 } KSERVICE_TABLE_DESCRIPTOR, *PKSERVICE_TABLE_DESCRIPTOR;
 
 KSERVICE_TABLE_DESCRIPTOR KeServiceDescriptorTable[4] = { { 0 } };
+
+#ifndef MM_COPY_MEMORY_PHYSICAL
+#define MM_COPY_MEMORY_PHYSICAL 0x1
+#endif
+
+typedef union _MM_COPY_ADDRESS
+{
+    void *VirtualAddress;
+    PHYSICAL_ADDRESS PhysicalAddress;
+} MM_COPY_ADDRESS, *PMM_COPY_ADDRESS;
 
 #define MAX_SERVICE_NAME 260
 
@@ -1990,6 +2001,33 @@ NTSTATUS WINAPI IoQueryDeviceDescription(PINTERFACE_TYPE itype, PULONG bus, PCON
 }
 
 /***********************************************************************
+ *           IoQueryFullDriverPath    (NTOSKRNL.EXE.@)
+ */
+NTSTATUS WINAPI IoQueryFullDriverPath( PDRIVER_OBJECT driver, PUNICODE_STRING fullpath )
+{
+    if (!driver || !fullpath) return STATUS_INVALID_PARAMETER;
+
+    if (!driver->DriverName.Buffer || !driver->DriverName.Length)
+    {
+        fullpath->MaximumLength = sizeof(WCHAR);
+        fullpath->Buffer = ExAllocatePool( NonPagedPool, fullpath->MaximumLength );
+        if (!fullpath->Buffer) return STATUS_INSUFFICIENT_RESOURCES;
+        fullpath->Length = 0;
+        fullpath->Buffer[0] = 0;
+        return STATUS_SUCCESS;
+    }
+
+    fullpath->MaximumLength = driver->DriverName.Length + sizeof(WCHAR);
+    fullpath->Buffer = ExAllocatePool( NonPagedPool, fullpath->MaximumLength );
+    if (!fullpath->Buffer) return STATUS_INSUFFICIENT_RESOURCES;
+
+    memcpy( fullpath->Buffer, driver->DriverName.Buffer, driver->DriverName.Length );
+    fullpath->Length = driver->DriverName.Length;
+    fullpath->Buffer[fullpath->Length / sizeof(WCHAR)] = 0;
+    return STATUS_SUCCESS;
+}
+
+/***********************************************************************
  *           IoRegisterDriverReinitialization    (NTOSKRNL.EXE.@)
  */
 void WINAPI IoRegisterDriverReinitialization( PDRIVER_OBJECT obj, PDRIVER_REINITIALIZE reinit, PVOID context )
@@ -2848,6 +2886,37 @@ ULONGLONG WINAPI KeQueryInterruptTime( void )
     return totaltime.QuadPart;
 }
 
+/**********************************************************************
+ *           KeQueryPerformanceCounter   (NTOSKRNL.EXE.@)
+ */
+ULONGLONG WINAPI KeQueryPerformanceCounter( LARGE_INTEGER *frequency )
+{
+    LARGE_INTEGER counter;
+
+    TRACE("(%p)\n", frequency);
+    NtQueryPerformanceCounter( &counter, frequency );
+    return counter.QuadPart;
+}
+
+/**********************************************************************
+ *           KeQueryUnbiasedInterruptTime   (NTOSKRNL.EXE.@)
+ */
+ULONGLONG WINAPI KeQueryUnbiasedInterruptTime( void )
+{
+    return KeQueryInterruptTime();
+}
+
+/**********************************************************************
+ *           KeQueryPrcbAddress   (NTOSKRNL.EXE.@)
+ */
+void *WINAPI KeQueryPrcbAddress( ULONG number )
+{
+    static BYTE dummy_prcb[0x100];
+
+    TRACE("(%lu)\n", number);
+    return dummy_prcb;
+}
+
 /***********************************************************************
  *           KeQueryPriorityThread   (NTOSKRNL.EXE.@)
  */
@@ -3160,6 +3229,24 @@ PVOID WINAPI MmMapIoSpace( PHYSICAL_ADDRESS PhysicalAddress, DWORD NumberOfBytes
     return NULL;
 }
 
+/***********************************************************************
+ *           MmMapIoSpaceEx   (NTOSKRNL.EXE.@)
+ */
+PVOID WINAPI MmMapIoSpaceEx( PHYSICAL_ADDRESS PhysicalAddress, SIZE_T NumberOfBytes, ULONG Protect )
+{
+    FIXME( "stub: 0x%08lx%08lx, %Iu, %lu\n", PhysicalAddress.HighPart, PhysicalAddress.LowPart, NumberOfBytes, Protect );
+    return MmMapIoSpace( PhysicalAddress, (DWORD)NumberOfBytes, Protect );
+}
+
+/***********************************************************************
+ *           MmSecureVirtualMemoryEx   (NTOSKRNL.EXE.@)
+ */
+PVOID WINAPI MmSecureVirtualMemoryEx( PVOID address, SIZE_T size, ULONG mode )
+{
+    FIXME( "(%p, %Iu, %lu) stub\n", address, size, mode );
+    return address ? address : (PVOID)1;
+}
+
 
 /***********************************************************************
  *           MmLockPagableSectionByHandle  (NTOSKRNL.EXE.@)
@@ -3429,6 +3516,30 @@ ULONG WINAPI PsGetCurrentProcessSessionId(void)
 HANDLE WINAPI PsGetCurrentThreadId(void)
 {
     return KeGetCurrentThread()->id.UniqueThread;
+}
+
+/***********************************************************************
+ *           PsGetCurrentThreadProcess   (NTOSKRNL.EXE.@)
+ */
+PEPROCESS WINAPI PsGetCurrentThreadProcess(void)
+{
+    return IoGetCurrentProcess();
+}
+
+/***********************************************************************
+ *           PsGetCurrentThreadProcessId   (NTOSKRNL.EXE.@)
+ */
+HANDLE WINAPI PsGetCurrentThreadProcessId(void)
+{
+    return PsGetCurrentProcessId();
+}
+
+/***********************************************************************
+ *           PsGetCurrentThreadTeb   (NTOSKRNL.EXE.@)
+ */
+PTEB WINAPI PsGetCurrentThreadTeb(void)
+{
+    return NtCurrentTeb();
 }
 
 
@@ -4468,6 +4579,22 @@ void FASTCALL ExfUnblockPushLock( EX_PUSH_LOCK *lock, PEX_PUSH_LOCK_WAIT_BLOCK b
 }
 
 /*********************************************************************
+ *           ExAcquirePushLockSharedEx    (NTOSKRNL.@)
+ */
+void WINAPI ExAcquirePushLockSharedEx( EX_PUSH_LOCK *lock, ULONG flags )
+{
+    FIXME( "stub: %p, %lu\n", lock, flags );
+}
+
+/*********************************************************************
+ *           ExReleasePushLockSharedEx    (NTOSKRNL.@)
+ */
+void WINAPI ExReleasePushLockSharedEx( EX_PUSH_LOCK *lock, ULONG flags )
+{
+    FIXME( "stub: %p, %lu\n", lock, flags );
+}
+
+/*********************************************************************
  *           FsRtlRegisterFileSystemFilterCallbacks    (NTOSKRNL.@)
  */
 NTSTATUS WINAPI FsRtlRegisterFileSystemFilterCallbacks( DRIVER_OBJECT *object, PFS_FILTER_CALLBACKS callbacks)
@@ -4493,6 +4620,24 @@ BOOLEAN WINAPI SePrivilegeCheck(PRIVILEGE_SET *privileges, SECURITY_SUBJECT_CONT
 {
     FIXME("stub: %p %p %u\n", privileges, context, mode);
     return TRUE;
+}
+
+/*********************************************************************
+ *           SeSetAuditParameter    (NTOSKRNL.@)
+ */
+NTSTATUS WINAPI SeSetAuditParameter(ULONG parameter, void *buffer, ULONG length)
+{
+    FIXME("stub: %lu %p %lu\n", parameter, buffer, length);
+    return STATUS_SUCCESS;
+}
+
+/*********************************************************************
+ *           VslGetSecurePciEnabled    (NTOSKRNL.@)
+ */
+NTSTATUS WINAPI VslGetSecurePciEnabled(BOOLEAN *enabled)
+{
+    if (enabled) *enabled = FALSE;
+    return STATUS_SUCCESS;
 }
 
 /*********************************************************************
@@ -4557,6 +4702,15 @@ NTSTATUS WINAPI DbgQueryDebugFilterState(ULONG component, ULONG level)
 }
 
 /*********************************************************************
+ *           DbgCommandString    (NTOSKRNL.@)
+ */
+NTSTATUS WINAPI DbgCommandString(const char *name, const char *value, ULONG size)
+{
+    FIXME("(%s, %s, %lu) stub\n", debugstr_a(name), debugstr_a(value), size);
+    return STATUS_NOT_IMPLEMENTED;
+}
+
+/*********************************************************************
  *           PsGetProcessWow64Process    (NTOSKRNL.@)
  */
 PVOID WINAPI PsGetProcessWow64Process(PEPROCESS process)
@@ -4577,6 +4731,46 @@ NTSTATUS WINAPI MmCopyVirtualMemory(PEPROCESS fromprocess, void *fromaddress, PE
 
     *copied = 0;
     return STATUS_NOT_IMPLEMENTED;
+}
+
+/*********************************************************************
+ *           MmCopyMemory    (NTOSKRNL.EXE.@)
+ */
+NTSTATUS WINAPI MmCopyMemory( void *target, MM_COPY_ADDRESS source, SIZE_T bytes,
+                              ULONG flags, SIZE_T *copied )
+{
+    if (copied) *copied = 0;
+    if (!target || !bytes) return STATUS_INVALID_PARAMETER;
+
+    if (flags & MM_COPY_MEMORY_PHYSICAL)
+    {
+        FIXME("physical copy not supported: %Iu bytes\n", bytes);
+        return STATUS_NOT_IMPLEMENTED;
+    }
+
+    if (!source.VirtualAddress) return STATUS_INVALID_PARAMETER;
+
+    __TRY
+    {
+        memcpy( target, source.VirtualAddress, bytes );
+    }
+    __EXCEPT_PAGE_FAULT
+    {
+        return STATUS_ACCESS_VIOLATION;
+    }
+    __ENDTRY
+
+    if (copied) *copied = bytes;
+    return STATUS_SUCCESS;
+}
+
+/*********************************************************************
+ *           KeRemoveQueueApc    (NTOSKRNL.EXE.@)
+ */
+BOOLEAN WINAPI KeRemoveQueueApc( KAPC *apc )
+{
+    FIXME("stub: %p\n", apc);
+    return FALSE;
 }
 
 /*********************************************************************
@@ -4637,12 +4831,66 @@ NTSTATUS WINAPI ExUuidCreate(UUID *uuid)
 }
 
 /***********************************************************************
+ *           ExQueryTimerResolution   (NTOSKRNL.EXE.@)
+ */
+ULONG WINAPI ExQueryTimerResolution(ULONG *min, ULONG *max, ULONG *current)
+{
+    ULONG min_res = 0, max_res = 0, cur_res = 0;
+    NTSTATUS status;
+
+    status = NtQueryTimerResolution( &min_res, &max_res, &cur_res );
+    if (min) *min = min_res;
+    if (max) *max = max_res;
+    if (current) *current = cur_res;
+
+    if (status) return KeQueryTimeIncrement();
+    return cur_res;
+}
+
+/***********************************************************************
  *           ExSetTimerResolution   (NTOSKRNL.EXE.@)
  */
 ULONG WINAPI ExSetTimerResolution(ULONG time, BOOLEAN set_resolution)
 {
     FIXME("stub: %lu %d\n", time, set_resolution);
     return KeQueryTimeIncrement();
+}
+
+/***********************************************************************
+ *           ExGetFirmwareEnvironmentVariable   (NTOSKRNL.EXE.@)
+ */
+NTSTATUS WINAPI ExGetFirmwareEnvironmentVariable( UNICODE_STRING *name, GUID *vendor, void *value,
+                                                  ULONG *value_len, ULONG *attrs )
+{
+    FIXME( "(%s, %p, %p, %p, %p) stub\n", debugstr_us(name), vendor, value, value_len, attrs );
+    if (value_len) *value_len = 0;
+    if (attrs) *attrs = 0;
+    return STATUS_NOT_IMPLEMENTED;
+}
+
+/***********************************************************************
+ *           HalGetEnvironmentVariableEx   (NTOSKRNL.EXE.@)
+ */
+NTSTATUS WINAPI HalGetEnvironmentVariableEx( UNICODE_STRING *name, GUID *vendor, void *value,
+                                             ULONG *value_len, ULONG *attrs )
+{
+    FIXME( "(%s, %p, %p, %p, %p) stub\n", debugstr_us(name), vendor, value, value_len, attrs );
+    if (value_len) *value_len = 0;
+    if (attrs) *attrs = 0;
+    return STATUS_NOT_IMPLEMENTED;
+}
+
+/***********************************************************************
+ *           HalQueryRealTimeClock   (NTOSKRNL.EXE.@)
+ */
+BOOLEAN WINAPI HalQueryRealTimeClock( TIME_FIELDS *time )
+{
+    LARGE_INTEGER now;
+
+    if (!time) return FALSE;
+    NtQuerySystemTime( &now );
+    RtlTimeToTimeFields( &now, time );
+    return TRUE;
 }
 
 /***********************************************************************

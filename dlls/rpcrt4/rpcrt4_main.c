@@ -210,6 +210,29 @@ RPC_STATUS WINAPI RpcIfInqId(RPC_IF_HANDLE if_handle, RPC_IF_ID *if_id)
  */
 void DECLSPEC_NORETURN WINAPI RpcRaiseException(RPC_STATUS exception)
 {
+  if (exception == RPC_S_SERVER_UNAVAILABLE)
+  {
+    if (GetModuleHandleW(L"ACE-Base64.dll") || GetModuleHandleW(L"ACE-Helper.exe"))
+    {
+      WARN("HACK: swallowing RPC_S_SERVER_UNAVAILABLE with ACE loaded\n");
+      SetLastError(exception);
+      return;
+    }
+
+    HMODULE caller = NULL;
+    WCHAR path[MAX_PATH];
+
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           (LPCWSTR)__builtin_return_address(0), &caller) &&
+        GetModuleFileNameW(caller, path, ARRAY_SIZE(path)) &&
+        (wcsstr(path, L"AntiCheatExpert") || wcsstr(path, L"ACE-")))
+    {
+      WARN("HACK: swallowing RPC_S_SERVER_UNAVAILABLE from %s\n", debugstr_w(path));
+      SetLastError(exception);
+      return;
+    }
+  }
   /* shouldn't return */
   RaiseException(exception, 0, 0, NULL);
   ERR("handler continued execution\n");

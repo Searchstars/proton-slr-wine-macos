@@ -105,6 +105,7 @@
 @ stdcall D3DKMTCreateAllocation2(ptr) win32u.NtGdiDdDDICreateAllocation2
 @ stdcall D3DKMTCreateDCFromMemory(ptr) win32u.NtGdiDdDDICreateDCFromMemory
 @ stdcall D3DKMTCreateDevice(ptr) win32u.NtGdiDdDDICreateDevice
+@ stdcall D3DKMTCreateContext(ptr)
 @ stdcall D3DKMTCreateKeyedMutex(ptr) win32u.NtGdiDdDDICreateKeyedMutex
 @ stdcall D3DKMTCreateKeyedMutex2(ptr) win32u.NtGdiDdDDICreateKeyedMutex2
 @ stdcall D3DKMTCreateSynchronizationObject(ptr) win32u.NtGdiDdDDICreateSynchronizationObject
@@ -113,6 +114,7 @@
 @ stdcall D3DKMTDestroyAllocation2(ptr) win32u.NtGdiDdDDIDestroyAllocation2
 @ stdcall D3DKMTDestroyDCFromMemory(ptr) win32u.NtGdiDdDDIDestroyDCFromMemory
 @ stdcall D3DKMTDestroyDevice(ptr) win32u.NtGdiDdDDIDestroyDevice
+@ stdcall D3DKMTDestroyContext(ptr)
 @ stdcall D3DKMTDestroyKeyedMutex(ptr) win32u.NtGdiDdDDIDestroyKeyedMutex
 @ stdcall D3DKMTDestroySynchronizationObject(ptr) win32u.NtGdiDdDDIDestroySynchronizationObject
 @ stdcall D3DKMTEnumAdapters(ptr) win32u.NtGdiDdDDIEnumAdapters

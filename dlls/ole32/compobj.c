@@ -942,6 +942,14 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID reserved)
 }
 
 /***********************************************************************
+ *		DllCanUnloadNow (OLE32.@)
+ */
+HRESULT WINAPI DllCanUnloadNow(void)
+{
+    return S_FALSE;
+}
+
+/***********************************************************************
  *		DllRegisterServer (OLE32.@)
  */
 HRESULT WINAPI DllRegisterServer(void)

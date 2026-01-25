@@ -112,6 +112,7 @@
 @ stdcall -private DllGetClassObject (ptr ptr ptr)
 @ stub DllGetClassObjectWOW
 @ stdcall -private DllRegisterServer()
+@ stdcall -private DllCanUnloadNow()
 @ stdcall -private DllUnregisterServer()
 @ stdcall DoDragDrop(ptr ptr long ptr)
 @ stub EnableHookObject

@@ -1579,12 +1579,20 @@ NTSTATUS WINAPI RtlVirtualUnwind2( ULONG type, ULONG_PTR base, ULONG_PTR pc,
 
     *handler_data = NULL;
 
-    if (!func)  /* leaf function */
-        *handler_ret = NULL;
-    else if (func->Flag)
-        *handler_ret = unwind_packed_data( base, pc, func, context, ctx_ptr );
-    else
-        *handler_ret = unwind_full_data( base, pc, func, context, handler_data, ctx_ptr );
+    __TRY
+    {
+        if (!func)  /* leaf function */
+            *handler_ret = NULL;
+        else if (func->Flag)
+            *handler_ret = unwind_packed_data( base, pc, func, context, ctx_ptr );
+        else
+            *handler_ret = unwind_full_data( base, pc, func, context, handler_data, ctx_ptr );
+    }
+    __EXCEPT_PAGE_FAULT
+    {
+        return STATUS_BAD_FUNCTION_TABLE;
+    }
+    __ENDTRY
 
     TRACE( "ret: pc=%lx lr=%lx sp=%lx handler=%p\n", context->Pc, context->Lr, context->Sp, *handler_ret );
     if (!context->Pc)
@@ -2032,8 +2040,21 @@ static BOOL is_inside_epilog( BYTE *pc, ULONG64 base, const RUNTIME_FUNCTION *fu
     }
 }
 
+static BOOL safe_read_mem( const void *addr, SIZE_T size )
+{
+    BYTE buf[16];
+    SIZE_T read_size = min( size, sizeof(buf) );
+
+    return !NtReadVirtualMemory( NtCurrentProcess(), addr, buf, read_size, NULL );
+}
+
+static BOOL safe_read_u64( const void *addr, ULONG64 *val )
+{
+    return !NtReadVirtualMemory( NtCurrentProcess(), addr, val, sizeof(*val), NULL );
+}
+
 /* execute a function epilog, which must have been validated with is_inside_epilog() */
-static void interpret_epilog( BYTE *pc, CONTEXT *context, KNONVOLATILE_CONTEXT_POINTERS *ctx_ptr )
+static BOOL interpret_epilog( BYTE *pc, CONTEXT *context, KNONVOLATILE_CONTEXT_POINTERS *ctx_ptr )
 {
     for (;;)
     {
@@ -2051,6 +2072,7 @@ static void interpret_epilog( BYTE *pc, CONTEXT *context, KNONVOLATILE_CONTEXT_P
         case 0x5d: /* pop %rbp/r13 */
         case 0x5e: /* pop %rsi/r14 */
         case 0x5f: /* pop %rdi/r15 */
+            if (!safe_read_u64( (ULONG64 *)context->Rsp, (ULONG64 *)&rex )) return FALSE;
             set_int_reg( context, ctx_ptr, *pc - 0x58 + (rex & 1) * 8, (ULONG64 *)context->Rsp );
             context->Rsp += sizeof(ULONG64);
             pc++;
@@ -2076,19 +2098,19 @@ static void interpret_epilog( BYTE *pc, CONTEXT *context, KNONVOLATILE_CONTEXT_P
             }
             continue;
         case 0xc2: /* ret $nn */
-            context->Rip = *(ULONG64 *)context->Rsp;
+            if (!safe_read_u64( (ULONG64 *)context->Rsp, &context->Rip )) return FALSE;
             context->Rsp += sizeof(ULONG64) + *(WORD *)(pc + 1);
-            return;
+            return TRUE;
         case 0xe9: /* jmp nnnn */
         case 0xeb: /* jmp n */
         case 0xc3: /* ret */
         case 0xf3: /* rep; ret */
         case 0xff: /* jmp */
-            context->Rip = *(ULONG64 *)context->Rsp;
+            if (!safe_read_u64( (ULONG64 *)context->Rsp, &context->Rip )) return FALSE;
             context->Rsp += sizeof(ULONG64);
-            return;
+            return TRUE;
         }
-        return;
+        return TRUE;
     }
 }
 
@@ -2155,8 +2177,16 @@ NTSTATUS WINAPI RtlVirtualUnwind2( ULONG type, ULONG_PTR base, ULONG_PTR pc,
 
     if (!function)  /* leaf function */
     {
-        context->Rip = *(ULONG64 *)context->Rsp;
-        context->Rsp += sizeof(ULONG64);
+        __TRY
+        {
+            context->Rip = *(ULONG64 *)context->Rsp;
+            context->Rsp += sizeof(ULONG64);
+        }
+        __EXCEPT_PAGE_FAULT
+        {
+            return STATUS_BAD_FUNCTION_TABLE;
+        }
+        __ENDTRY
         *data = NULL;
         *handler_ret = NULL;
         return STATUS_SUCCESS;
@@ -2167,6 +2197,7 @@ NTSTATUS WINAPI RtlVirtualUnwind2( ULONG type, ULONG_PTR base, ULONG_PTR pc,
     for (;;)
     {
         info = (struct UNWIND_INFO *)((char *)base + function->UnwindData);
+        if (!safe_read_mem( info, sizeof(*info) )) return STATUS_BAD_FUNCTION_TABLE;
         handler_data = (union handler_data *)&info->opcodes[(info->count + 1) & ~1];
 
         if (info->version != 1 && info->version != 2)
@@ -2191,7 +2222,7 @@ NTSTATUS WINAPI RtlVirtualUnwind2( ULONG type, ULONG_PTR base, ULONG_PTR pc,
             if (!chained && info->count && is_inside_epilog( (BYTE *)pc, base, function ))
             {
                 TRACE("inside epilog.\n");
-                interpret_epilog( (BYTE *)pc, context, ctx_ptr );
+                if (!interpret_epilog( (BYTE *)pc, context, ctx_ptr )) return STATUS_BAD_FUNCTION_TABLE;
                 *frame_ret = info->frame_reg ? context->Rsp - 8 : frame;
                 *handler_ret = NULL;
                 return STATUS_SUCCESS;
@@ -2205,6 +2236,7 @@ NTSTATUS WINAPI RtlVirtualUnwind2( ULONG type, ULONG_PTR base, ULONG_PTR pc,
             switch (info->opcodes[i].code)
             {
             case UWOP_PUSH_NONVOL:  /* pushq %reg */
+                if (!safe_read_u64( (ULONG64 *)context->Rsp, (ULONG64 *)&off )) return STATUS_BAD_FUNCTION_TABLE;
                 set_int_reg( context, ctx_ptr, info->opcodes[i].info, (ULONG64 *)context->Rsp );
                 context->Rsp += sizeof(ULONG64);
                 break;
@@ -2220,18 +2252,22 @@ NTSTATUS WINAPI RtlVirtualUnwind2( ULONG type, ULONG_PTR base, ULONG_PTR pc,
                 break;
             case UWOP_SAVE_NONVOL:  /* movq %reg,n(%rsp) */
                 off = frame + *(USHORT *)&info->opcodes[i+1] * 8;
+                if (!safe_read_u64( (ULONG64 *)off, (ULONG64 *)&frame )) return STATUS_BAD_FUNCTION_TABLE;
                 set_int_reg( context, ctx_ptr, info->opcodes[i].info, (ULONG64 *)off );
                 break;
             case UWOP_SAVE_NONVOL_FAR:  /* movq %reg,nn(%rsp) */
                 off = frame + *(DWORD *)&info->opcodes[i+1];
+                if (!safe_read_u64( (ULONG64 *)off, (ULONG64 *)&frame )) return STATUS_BAD_FUNCTION_TABLE;
                 set_int_reg( context, ctx_ptr, info->opcodes[i].info, (ULONG64 *)off );
                 break;
             case UWOP_SAVE_XMM128:  /* movaps %xmmreg,n(%rsp) */
                 off = frame + *(USHORT *)&info->opcodes[i+1] * 16;
+                if (!safe_read_mem( (void *)off, sizeof(M128A) )) return STATUS_BAD_FUNCTION_TABLE;
                 set_float_reg( context, ctx_ptr, info->opcodes[i].info, (M128A *)off );
                 break;
             case UWOP_SAVE_XMM128_FAR:  /* movaps %xmmreg,nn(%rsp) */
                 off = frame + *(DWORD *)&info->opcodes[i+1];
+                if (!safe_read_mem( (void *)off, sizeof(M128A) )) return STATUS_BAD_FUNCTION_TABLE;
                 set_float_reg( context, ctx_ptr, info->opcodes[i].info, (M128A *)off );
                 break;
             case UWOP_PUSH_MACHFRAME:
@@ -2249,8 +2285,8 @@ NTSTATUS WINAPI RtlVirtualUnwind2( ULONG type, ULONG_PTR base, ULONG_PTR pc,
                 if (info->opcodes[i].info)
                     context->Rsp += 0x8;
 
-                context->Rip = *(ULONG64 *)context->Rsp;
-                context->Rsp = *(ULONG64 *)(context->Rsp + 24);
+                if (!safe_read_u64( (ULONG64 *)context->Rsp, &context->Rip )) return STATUS_BAD_FUNCTION_TABLE;
+                if (!safe_read_u64( (ULONG64 *)(context->Rsp + 24), &context->Rsp )) return STATUS_BAD_FUNCTION_TABLE;
                 mach_frame = TRUE;
                 break;
             case UWOP_EPILOG:
@@ -2270,7 +2306,7 @@ NTSTATUS WINAPI RtlVirtualUnwind2( ULONG type, ULONG_PTR base, ULONG_PTR pc,
     if (!mach_frame)
     {
         /* now pop return address */
-        context->Rip = *(ULONG64 *)context->Rsp;
+        if (!safe_read_u64( (ULONG64 *)context->Rsp, &context->Rip )) return STATUS_BAD_FUNCTION_TABLE;
         context->Rsp += sizeof(ULONG64);
     }
 

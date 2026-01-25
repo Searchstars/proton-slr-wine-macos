@@ -1225,6 +1225,15 @@ PVOID WINAPI DECLSPEC_HOTPATCH FlsGetValue( DWORD index )
     return data;
 }
 
+/***********************************************************************
+ *           FlsGetValue2   (kernelbase.@)
+ */
+PVOID WINAPI DECLSPEC_HOTPATCH FlsGetValue2( DWORD index, void *unknown )
+{
+    if (unknown) *(DWORD *)unknown = 0;
+    return FlsGetValue( index );
+}
+
 
 /***********************************************************************
  *           FlsSetValue   (kernelbase.@)

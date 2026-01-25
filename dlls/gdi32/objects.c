@@ -898,6 +898,24 @@ NTSTATUS WINAPI D3DKMTOpenAdapterFromGdiDisplayName( D3DKMT_OPENADAPTERFROMGDIDI
 }
 
 /***********************************************************************
+ *           D3DKMTCreateContext    (GDI32.@)
+ */
+NTSTATUS WINAPI D3DKMTCreateContext( void *desc )
+{
+    FIXME("stub: %p\n", desc);
+    return STATUS_NOT_IMPLEMENTED;
+}
+
+/***********************************************************************
+ *           D3DKMTDestroyContext    (GDI32.@)
+ */
+NTSTATUS WINAPI D3DKMTDestroyContext( void *desc )
+{
+    FIXME("stub: %p\n", desc);
+    return STATUS_NOT_IMPLEMENTED;
+}
+
+/***********************************************************************
  *           SetObjectOwner    (GDI32.@)
  */
 void WINAPI SetObjectOwner( HGDIOBJ handle, HANDLE owner )

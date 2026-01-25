@@ -243,8 +243,19 @@ NTSTATUS WINAPI RtlWow64GetThreadSelectorEntry( HANDLE handle, THREAD_DESCRIPTOR
     DWORD sel;
     WOW64_CONTEXT context = { WOW64_CONTEXT_CONTROL | WOW64_CONTEXT_SEGMENTS };
     LDT_ENTRY entry = { 0 };
+    MEMORY_BASIC_INFORMATION mbi;
+    SIZE_T mbi_len;
+    NTSTATUS status;
 
     if (size != sizeof(*info)) return STATUS_INFO_LENGTH_MISMATCH;
+    if (!info) return STATUS_INVALID_PARAMETER;
+    status = NtQueryVirtualMemory( NtCurrentProcess(), info, MemoryBasicInformation,
+                                   &mbi, sizeof(mbi), &mbi_len );
+    if (status || mbi.State != MEM_COMMIT ||
+        !(mbi.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE)) ||
+        (ULONG_PTR)info + sizeof(*info) > (ULONG_PTR)mbi.BaseAddress + mbi.RegionSize)
+        return STATUS_ACCESS_VIOLATION;
+
     if (RtlWow64GetThreadContext( handle, &context ))
     {
         /* hardcoded values */
@@ -263,7 +274,15 @@ NTSTATUS WINAPI RtlWow64GetThreadSelectorEntry( HANDLE handle, THREAD_DESCRIPTOR
 #endif
     }
 
-    sel = info->Selector | 3;
+    __TRY
+    {
+        sel = info->Selector | 3;
+    }
+    __EXCEPT_PAGE_FAULT
+    {
+        return STATUS_ACCESS_VIOLATION;
+    }
+    __ENDTRY
     if (sel == 0x03) goto done; /* null selector */
 
     /* set common data */
@@ -301,8 +320,16 @@ NTSTATUS WINAPI RtlWow64GetThreadSelectorEntry( HANDLE handle, THREAD_DESCRIPTOR
     else return STATUS_UNSUCCESSFUL;
 
 done:
-    info->Entry = entry;
-    if (retlen) *retlen = sizeof(entry);
+    __TRY
+    {
+        info->Entry = entry;
+        if (retlen) *retlen = sizeof(entry);
+    }
+    __EXCEPT_PAGE_FAULT
+    {
+        return STATUS_ACCESS_VIOLATION;
+    }
+    __ENDTRY
     return STATUS_SUCCESS;
 }
 
@@ -714,6 +741,33 @@ NTSTATUS WINAPI DbgUiConvertStateChangeStructure( DBGUI_WAIT_STATE_CHANGE *state
         return STATUS_UNSUCCESSFUL;
     }
     return STATUS_SUCCESS;
+}
+
+/***********************************************************************
+ *      NtWow64QueryInformationProcess64 (NTDLL.@)
+ */
+NTSTATUS WINAPI NtWow64QueryInformationProcess64( HANDLE handle, PROCESSINFOCLASS class, void *info,
+                                                  ULONG size, ULONG *retlen )
+{
+    return NtQueryInformationProcess( handle, class, info, size, retlen );
+}
+
+/***********************************************************************
+ *      NtWow64ReadVirtualMemory64 (NTDLL.@)
+ */
+NTSTATUS WINAPI NtWow64ReadVirtualMemory64( HANDLE process, ULONG64 addr, void *buffer,
+                                            ULONG64 size, ULONG64 *bytes_read )
+{
+    SIZE_T read = 0;
+    SIZE_T to_read;
+    NTSTATUS status;
+
+    if (addr > (ULONG64)(ULONG_PTR)-1) return STATUS_INVALID_PARAMETER;
+
+    to_read = size > (ULONG64)(~(SIZE_T)0) ? (SIZE_T)~(SIZE_T)0 : (SIZE_T)size;
+    status = NtReadVirtualMemory( process, (void *)(ULONG_PTR)addr, buffer, to_read, &read );
+    if (bytes_read) *bytes_read = read;
+    return status;
 }
 
 /***********************************************************************

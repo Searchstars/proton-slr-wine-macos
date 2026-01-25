@@ -4,6 +4,7 @@
 @ stdcall -fastcall ExAcquireFastMutexUnsafe(ptr)
 @ stub ExAcquireRundownProtection
 @ stub ExAcquireRundownProtectionEx
+@ stdcall ExAcquirePushLockSharedEx(ptr long)
 @ stub ExInitializeRundownProtection
 @ stub ExInterlockedAddLargeStatistic
 @ stub ExInterlockedCompareExchange64
@@ -16,6 +17,7 @@
 @ stdcall -fastcall ExReleaseResourceLite(ptr)
 @ stub ExReleaseRundownProtection
 @ stub ExReleaseRundownProtectionEx
+@ stdcall ExReleasePushLockSharedEx(ptr long)
 @ stub ExRundownCompleted
 @ stub ExWaitForRundownProtectionRelease
 @ stub ExfAcquirePushLockExclusive
@@ -35,6 +37,8 @@
 @ stdcall -arch=win64 ExpInterlockedPopEntrySList(ptr) RtlInterlockedPopEntrySList
 @ stdcall -arch=win64 ExpInterlockedPushEntrySList(ptr ptr) RtlInterlockedPushEntrySList
 @ stub HalExamineMBR
+@ stdcall HalGetEnvironmentVariableEx(ptr ptr ptr ptr ptr)
+@ stdcall HalQueryRealTimeClock(ptr)
 @ stdcall -arch=!i386 InitializeSListHead(ptr) RtlInitializeSListHead
 @ stdcall -fastcall InterlockedCompareExchange(ptr long long) NTOSKRNL_InterlockedCompareExchange
 @ stdcall -fastcall InterlockedDecrement(ptr) NTOSKRNL_InterlockedDecrement
@@ -126,6 +130,7 @@
 @ stdcall CmUnRegisterCallback(int64)
 @ stdcall DbgBreakPoint()
 @ stub DbgBreakPointWithStatus
+@ stdcall DbgCommandString(str str long)
 @ stub DbgLoadImageSymbols
 @ varargs DbgPrint(str)
 @ varargs DbgPrintEx(long long str)
@@ -161,6 +166,7 @@
 @ stub ExGetCurrentProcessorCounts
 @ stub ExGetCurrentProcessorCpuUsage
 @ stdcall ExGetExclusiveWaiterCount(ptr)
+@ stdcall ExGetFirmwareEnvironmentVariable(ptr ptr ptr ptr ptr)
 @ stdcall ExGetPreviousMode()
 @ stdcall ExGetSharedWaiterCount(ptr)
 @ stdcall ExInitializeNPagedLookasideList(ptr ptr ptr long long long long)
@@ -184,6 +190,7 @@
 @ stdcall ExLocalTimeToSystemTime(ptr ptr) RtlLocalTimeToSystemTime
 @ stdcall ExNotifyCallback(ptr ptr ptr)
 @ stub ExQueryPoolBlockSize
+@ stdcall ExQueryTimerResolution(ptr ptr ptr)
 @ stub ExQueueWorkItem
 @ stub ExRaiseAccessViolation
 @ stub ExRaiseDatatypeMisalignment
@@ -441,6 +448,7 @@
 @ stub IoPageRead
 @ stub IoPnPDeliverServicePowerNotification
 @ stdcall IoQueryDeviceDescription(ptr ptr ptr ptr ptr ptr ptr ptr)
+@ stdcall IoQueryFullDriverPath(ptr ptr)
 @ stub IoQueryFileDosDeviceName
 @ stub IoQueryFileInformation
 @ stub IoQueryVolumeInformation
@@ -612,11 +620,14 @@
 @ stdcall KeQueryActiveGroupCount() GetActiveProcessorGroupCount
 @ stdcall KeQueryGroupAffinity(long)
 @ stdcall KeQueryInterruptTime()
+@ stdcall KeQueryPerformanceCounter(ptr)
+@ stdcall KeQueryPrcbAddress(long)
 @ stdcall KeQueryPriorityThread(ptr)
 @ stub KeQueryRuntimeThread
 @ stdcall KeQuerySystemTime(ptr)
 @ stdcall KeQueryTickCount(ptr)
 @ stdcall KeQueryTimeIncrement()
+@ stdcall KeQueryUnbiasedInterruptTime()
 @ stdcall KeQueryMaximumGroupCount() GetMaximumProcessorGroupCount
 @ stdcall KeQueryMaximumProcessorCountEx(long)
 @ stdcall KeQueryMaximumProcessorCount()
@@ -640,6 +651,7 @@
 @ stdcall KeRemoveDeviceQueue(ptr)
 @ stub KeRemoveEntryDeviceQueue
 @ stub KeRemoveQueue
+@ stdcall KeRemoveQueueApc(ptr)
 @ stub KeRemoveQueueDpc
 @ stub KeRemoveSystemServiceTable
 @ stdcall KeResetEvent(ptr)
@@ -714,6 +726,7 @@
 @ stub MmCanFileBeTruncated
 @ stub MmCommitSessionMappedView
 @ stdcall MmCopyVirtualMemory(ptr ptr ptr ptr long long ptr)
+@ stdcall MmCopyMemory(ptr ptr long long ptr)
 @ stub MmCreateMdl
 @ stdcall MmCreateSection(ptr long ptr ptr long long long ptr)
 @ stub MmDisableModifiedWriteOfSection
@@ -740,6 +753,7 @@
 @ stub MmLockPagableImageSection
 @ stdcall MmLockPagableSectionByHandle(ptr)
 @ stdcall MmMapIoSpace(int64 long long)
+@ stdcall MmMapIoSpaceEx(int64 long long)
 @ stub MmMapLockedPages
 @ stdcall MmMapLockedPagesSpecifyCache(ptr long long ptr long long)
 @ stub MmMapLockedPagesWithReservedMapping
@@ -762,6 +776,7 @@
 @ stdcall MmResetDriverPaging(ptr)
 @ stub MmSectionObjectType
 @ stub MmSecureVirtualMemory
+@ stdcall MmSecureVirtualMemoryEx(ptr long long)
 @ stub MmSetAddressRangeModified
 @ stub MmSetBankedSection
 @ stub MmSizeOfMdl
@@ -912,6 +927,9 @@
 @ stdcall PsGetCurrentProcessSessionId()
 @ stdcall PsGetCurrentThread() KeGetCurrentThread
 @ stdcall PsGetCurrentThreadId()
+@ stdcall PsGetCurrentThreadProcess()
+@ stdcall PsGetCurrentThreadProcessId()
+@ stdcall PsGetCurrentThreadTeb()
 @ stub PsGetCurrentThreadPreviousMode
 @ stub PsGetCurrentThreadStackBase
 @ stub PsGetCurrentThreadStackLimit
@@ -1370,6 +1388,7 @@
 @ stub SeReleaseSecurityDescriptor
 @ stub SeReleaseSubjectContext
 @ stub SeSetAccessStateGenericMapping
+@ stdcall SeSetAuditParameter(long ptr long)
 @ stub SeSetSecurityDescriptorInfo
 @ stub SeSetSecurityDescriptorInfoEx
 @ stdcall SeSinglePrivilegeCheck(int64 long)
@@ -1683,6 +1702,7 @@
 @ cdecl towupper(long)
 @ stdcall vDbgPrintEx(long long str ptr)
 @ stdcall vDbgPrintExWithPrefix(str long long str ptr)
+@ stdcall VslGetSecurePciEnabled(ptr)
 @ cdecl vsprintf(ptr str ptr)
 @ cdecl vsprintf_s(ptr long str ptr)
 @ cdecl vswprintf_s(ptr long wstr ptr)

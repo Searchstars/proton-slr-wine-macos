@@ -30,6 +30,11 @@ WINE_DEFAULT_DEBUG_CHANNEL(eventlog);
 static SERVICE_STATUS_HANDLE svc_handle;
 static HANDLE done_event;
 
+void WINAPI SvchostPushServiceGlobals(void *globals)
+{
+    TRACE("(%p)\n", globals);
+}
+
 static void eventlog_update_status(DWORD state)
 {
     SERVICE_STATUS status;

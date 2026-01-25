@@ -51,6 +51,12 @@ static HANDLE job_object, job_completion_port;
 
 static const BOOL is_win64 = (sizeof(void *) > sizeof(int));
 
+static BOOL is_ace_service_name( const WCHAR *name )
+{
+    if (!name) return FALSE;
+    return !wcscmp( name, L"AntiCheatExpert Protection" ) || !wcscmp( name, L"ACE-BASE" );
+}
+
 static DWORD process_create(const WCHAR *name, struct process_entry **entry)
 {
     DWORD err;
@@ -1174,6 +1180,19 @@ DWORD service_start(struct service_entry *service, DWORD service_argc, LPCWSTR *
     struct process_entry *process = NULL;
     BOOL shared_process;
     DWORD err;
+
+    if (is_ace_service_name( service->name ) &&
+        (service->config.dwServiceType == SERVICE_KERNEL_DRIVER ||
+         service->config.dwServiceType == SERVICE_FILE_SYSTEM_DRIVER))
+    {
+        service_lock( service );
+        service->status.dwCurrentState = SERVICE_RUNNING;
+        service->status.dwControlsAccepted = SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN;
+        SetEvent( service->status_changed_event );
+        service_unlock( service );
+        WINE_TRACE( "HACK: pretending driver service %s is running.\n", wine_dbgstr_w( service->name ) );
+        return ERROR_SUCCESS;
+    }
 
     if (service->name && (!wcscmp(service->name, L"edgeupdate") || !wcscmp(service->name, L"edgeupdatem")))
     {

@@ -749,6 +749,21 @@ static const WCHAR *hack_append_command_line_crossover( const WCHAR *cmd, const 
     return NULL;
 }
 
+static BOOL is_ace_process_path( const WCHAR *path )
+{
+    if (!path) return FALSE;
+    if (!wcsstr( path, L".exe" )) return FALSE;
+    if (wcsstr( path, L"AntiCheatExpert" ) && wcsstr( path, L"ACE-" )) return TRUE;
+    if (wcsstr( path, L"ACE-Helper.exe" )) return TRUE;
+    if (wcsstr( path, L"ACE-Center" ) && wcsstr( path, L".exe" )) return TRUE;
+    return FALSE;
+}
+
+static BOOL is_ace_process_image( const WCHAR *app_name, const WCHAR *cmd_line )
+{
+    return is_ace_process_path( app_name ) || is_ace_process_path( cmd_line );
+}
+
 /**********************************************************************
  *           CreateProcessInternalW   (kernelbase.@)
  */
@@ -834,6 +849,22 @@ BOOL WINAPI DECLSPEC_HOTPATCH CreateProcessInternalW( HANDLE token, const WCHAR 
     /* end CROSSOVER HACK */
 
     TRACE( "app %s cmdline %s after all hacks\n", debugstr_w(app_name), debugstr_w(tidy_cmdline) );
+
+    if (is_ace_process_image( app_name, tidy_cmdline ))
+    {
+        static const WCHAR cmdexe[] = L"C:\\windows\\system32\\cmd.exe";
+        static const WCHAR fake_cmd[] = L"\"C:\\windows\\system32\\cmd.exe\" /c exit 0";
+        WCHAR *new_cmdline;
+        SIZE_T size;
+
+        if (tidy_cmdline != cmd_line) HeapFree( GetProcessHeap(), 0, tidy_cmdline );
+        size = (lstrlenW( fake_cmd ) + 1) * sizeof(WCHAR);
+        if (!(new_cmdline = HeapAlloc( GetProcessHeap(), 0, size ))) return FALSE;
+        lstrcpyW( new_cmdline, fake_cmd );
+        tidy_cmdline = new_cmdline;
+        app_name = cmdexe;
+        TRACE( "HACK: redirecting ACE process to cmd.exe /c exit 0\n" );
+    }
     
     product_name = get_product_name( app_name );
     if (battleye_launcher_redirect_hack( app_name, name, ARRAY_SIZE(name), &orig_app_name, product_name ))

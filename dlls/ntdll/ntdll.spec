@@ -461,6 +461,8 @@
 @ stdcall -syscall -arch=win32 NtWow64QueryInformationProcess64(long long ptr long ptr)
 @ stdcall -syscall -arch=win32 NtWow64ReadVirtualMemory64(long int64 ptr int64 ptr)
 @ stdcall -syscall -arch=win32 NtWow64WriteVirtualMemory64(long int64 ptr int64 ptr)
+@ stdcall -arch=!i386 NtWow64QueryInformationProcess64(long long ptr long ptr)
+@ stdcall -arch=!i386 NtWow64ReadVirtualMemory64(long int64 ptr int64 ptr)
 @ stdcall -syscall NtWriteFile(long long ptr ptr ptr ptr long ptr ptr)
 @ stdcall -syscall NtWriteFileGather(long long ptr ptr ptr ptr long ptr ptr)
 # @ stub NtWriteRequestData

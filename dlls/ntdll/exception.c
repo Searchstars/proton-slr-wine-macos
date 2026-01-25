@@ -23,6 +23,7 @@
 #include <errno.h>
 #include <signal.h>
 #include <stdarg.h>
+#include <string.h>
 
 #include "ntstatus.h"
 #define WIN32_NO_STATUS
@@ -306,17 +307,92 @@ NTSTATUS WINAPI dispatch_exception( EXCEPTION_RECORD *rec, CONTEXT *context )
     {
         struct debugstr_pc_args params;
         char buffer[256];
+        BOOL is_endfield = FALSE;
+        LDR_DATA_TABLE_ENTRY *mod = NULL;
+        UNICODE_STRING endfield_base;
+        UNICODE_STRING endfield_exe;
 
         params.pc = rec->ExceptionAddress;
         params.buffer = buffer;
         params.size = sizeof(buffer);
+
+        RtlInitUnicodeString( &endfield_base, L"EndfieldBase.dll" );
+        RtlInitUnicodeString( &endfield_exe, L"Endfield.exe" );
+        if (!LdrFindEntryForAddress( rec->ExceptionAddress, &mod ) && mod)
+            is_endfield = !RtlCompareUnicodeString( &mod->BaseDllName, &endfield_base, TRUE ) ||
+                          !RtlCompareUnicodeString( &mod->BaseDllName, &endfield_exe, TRUE );
+
         if (!WINE_UNIX_CALL( unix_debugstr_pc, &params ))
+        {
             WINE_BACKTRACE_LOG( "--- Exception %#lx at %s.\n", rec->ExceptionCode, buffer );
+            if (strstr( buffer, "EndfieldBase.dll" ) || strstr( buffer, "Endfield.exe" ))
+                is_endfield = TRUE;
+        }
         else
             WINE_BACKTRACE_LOG( "--- Exception %#lx.\n", rec->ExceptionCode );
+
+        if (rec->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && is_endfield)
+        {
+            void *stack[64];
+            USHORT count = RtlCaptureStackBackTrace( 0, ARRAY_SIZE(stack), stack, NULL );
+            char frame_buf[256];
+            USHORT i;
+
+            WINE_BACKTRACE_LOG( "  Backtrace:\n" );
+            for (i = 0; i < count; i++)
+            {
+                LDR_DATA_TABLE_ENTRY *frame_mod = NULL;
+
+                params.pc = stack[i];
+                params.buffer = frame_buf;
+                params.size = sizeof(frame_buf);
+                if (!WINE_UNIX_CALL( unix_debugstr_pc, &params ))
+                    WINE_BACKTRACE_LOG( "    %s\n", frame_buf );
+                else if (!LdrFindEntryForAddress( stack[i], &frame_mod ) && frame_mod)
+                    WINE_BACKTRACE_LOG( "    %p: %s + %p.\n", stack[i],
+                                        debugstr_w( frame_mod->BaseDllName.Buffer ),
+                                        (void *)((char *)stack[i] - (char *)frame_mod->DllBase) );
+                else
+                    WINE_BACKTRACE_LOG( "    %p\n", stack[i] );
+            }
+        }
     }
 
     log_verbose_exception( rec );
+
+    /* Work around EndfieldBase.dll null write at +0x1D6512E to keep execution going. */
+    if (rec->ExceptionCode == EXCEPTION_ACCESS_VIOLATION &&
+        rec->NumberParameters >= 2 &&
+        rec->ExceptionInformation[0] == 1 && /* write */
+        rec->ExceptionInformation[1] == 0)
+    {
+        LDR_DATA_TABLE_ENTRY *mod = NULL;
+        if (!LdrFindEntryForAddress( rec->ExceptionAddress, &mod ) && mod)
+        {
+            UNICODE_STRING endfield_base;
+            ULONG_PTR offset = (ULONG_PTR)rec->ExceptionAddress - (ULONG_PTR)mod->DllBase;
+
+            RtlInitUnicodeString( &endfield_base, L"EndfieldBase.dll" );
+            if (!RtlCompareUnicodeString( &mod->BaseDllName, &endfield_base, TRUE ) &&
+                offset == 0x1d6512e)
+            {
+                static void *null_store;
+                if (!null_store)
+                {
+                    SIZE_T size = 0x1000;
+                    void *addr = NULL;
+                    if (!NtAllocateVirtualMemory( NtCurrentProcess(), &addr, 0, &size,
+                                                  MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE ))
+                        null_store = addr;
+                }
+                if (null_store)
+                {
+                    context->Rax = (ULONG_PTR)null_store;
+                    NtContinue( context, FALSE );
+                }
+            }
+        }
+    }
 
     switch (rec->ExceptionCode)
     {

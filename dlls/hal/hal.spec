@@ -43,7 +43,25 @@
 @ stub HalMakeBeep
 @ stub HalProcessorIdle
 @ stub HalQueryDisplayParameters
-@ stub HalQueryRealTimeClock
+@ stdcall HalQueryRealTimeClock(ptr) ntoskrnl.exe.HalQueryRealTimeClock
+@ stdcall HalGetEnvironmentVariableEx(ptr ptr ptr ptr ptr) ntoskrnl.exe.HalGetEnvironmentVariableEx
+@ stdcall DbgCommandString(str str long) ntoskrnl.exe.DbgCommandString
+@ stdcall ExAcquirePushLockSharedEx(ptr long) ntoskrnl.exe.ExAcquirePushLockSharedEx
+@ stdcall ExReleasePushLockSharedEx(ptr long) ntoskrnl.exe.ExReleasePushLockSharedEx
+@ stdcall ExGetFirmwareEnvironmentVariable(ptr ptr ptr ptr ptr) ntoskrnl.exe.ExGetFirmwareEnvironmentVariable
+@ stdcall ExQueryTimerResolution(ptr ptr ptr) ntoskrnl.exe.ExQueryTimerResolution
+@ stdcall IoQueryFullDriverPath(ptr ptr) ntoskrnl.exe.IoQueryFullDriverPath
+@ stdcall KeQueryPrcbAddress(long) ntoskrnl.exe.KeQueryPrcbAddress
+@ stdcall KeQueryUnbiasedInterruptTime() ntoskrnl.exe.KeQueryUnbiasedInterruptTime
+@ stdcall KeRemoveQueueApc(ptr) ntoskrnl.exe.KeRemoveQueueApc
+@ stdcall MmCopyMemory(ptr ptr long long ptr) ntoskrnl.exe.MmCopyMemory
+@ stdcall MmMapIoSpaceEx(int64 long long) ntoskrnl.exe.MmMapIoSpaceEx
+@ stdcall MmSecureVirtualMemoryEx(ptr long long) ntoskrnl.exe.MmSecureVirtualMemoryEx
+@ stdcall PsGetCurrentThreadProcess() ntoskrnl.exe.PsGetCurrentThreadProcess
+@ stdcall PsGetCurrentThreadProcessId() ntoskrnl.exe.PsGetCurrentThreadProcessId
+@ stdcall PsGetCurrentThreadTeb() ntoskrnl.exe.PsGetCurrentThreadTeb
+@ stdcall SeSetAuditParameter(long ptr long) ntoskrnl.exe.SeSetAuditParameter
+@ stdcall VslGetSecurePciEnabled(ptr) ntoskrnl.exe.VslGetSecurePciEnabled
 @ stub HalReadDmaCounter
 @ stub HalReportResourceUsage
 @ stub HalRequestIpi
