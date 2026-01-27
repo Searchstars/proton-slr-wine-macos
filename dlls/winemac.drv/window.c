@@ -192,7 +192,7 @@ static struct macdrv_win_data *alloc_win_data(HWND hwnd)
  *
  * Lock and return the data structure associated with a window.
  */
-struct macdrv_win_data *get_win_data(HWND hwnd)
+MACDRV_EXPORT struct macdrv_win_data *get_win_data(HWND hwnd)
 {
     struct macdrv_win_data *data;
 
@@ -210,7 +210,7 @@ struct macdrv_win_data *get_win_data(HWND hwnd)
  *
  * Release the data returned by get_win_data.
  */
-void release_win_data(struct macdrv_win_data *data)
+MACDRV_EXPORT void release_win_data(struct macdrv_win_data *data)
 {
     if (data) pthread_mutex_unlock(&win_data_mutex);
 }

@@ -16,3 +16,4 @@ tests/*.exe
 tests/*.o
 log.log
 tmp_patches
+dlls/winemetal

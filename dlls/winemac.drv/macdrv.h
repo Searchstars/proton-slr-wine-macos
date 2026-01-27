@@ -194,8 +194,8 @@ struct macdrv_win_data
     unsigned int        swap_interval : 1;      /* GL swap interval for window */
 };
 
-extern struct macdrv_win_data *get_win_data(HWND hwnd);
-extern void release_win_data(struct macdrv_win_data *data);
+extern MACDRV_EXPORT struct macdrv_win_data *get_win_data(HWND hwnd);
+extern MACDRV_EXPORT void release_win_data(struct macdrv_win_data *data);
 extern void init_win_context(void);
 extern macdrv_window macdrv_get_cocoa_window(HWND hwnd, BOOL require_on_screen);
 extern RGNDATA *get_region_data(HRGN hrgn, HDC hdc_lptodp);

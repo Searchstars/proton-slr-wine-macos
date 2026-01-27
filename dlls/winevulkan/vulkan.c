@@ -953,7 +953,7 @@ static VkResult wine_vk_instance_convert_create_info(struct conversion_context *
         TRACE("Extension %u: %s.\n", i, debugstr_a(extension_name));
     }
 
-    new_extensions = conversion_context_alloc(ctx, (src->enabledExtensionCount + 2) *
+    new_extensions = conversion_context_alloc(ctx, (src->enabledExtensionCount + 3) *
                                               sizeof(*src->ppEnabledExtensionNames));
     memcpy(new_extensions, src->ppEnabledExtensionNames,
            dst->enabledExtensionCount * sizeof(*dst->ppEnabledExtensionNames));
@@ -972,6 +972,40 @@ static VkResult wine_vk_instance_convert_create_info(struct conversion_context *
         {
             new_extensions[i] = vk_funcs->p_get_host_surface_extension();
             instance->enable_win32_surface = VK_TRUE;
+        }
+    }
+
+    if (p_vkEnumerateInstanceExtensionProperties)
+    {
+        VkExtensionProperties *host_exts;
+        uint32_t host_ext_count = 0;
+        VkResult host_res;
+        BOOL host_has_portability = FALSE;
+
+        host_res = p_vkEnumerateInstanceExtensionProperties(NULL, &host_ext_count, NULL);
+        if (host_res == VK_SUCCESS && host_ext_count)
+        {
+            host_exts = conversion_context_alloc(ctx, host_ext_count * sizeof(*host_exts));
+            host_res = p_vkEnumerateInstanceExtensionProperties(NULL, &host_ext_count, host_exts);
+            if (host_res == VK_SUCCESS)
+            {
+                for (i = 0; i < host_ext_count; i++)
+                {
+                    if (!strcmp(host_exts[i].extensionName, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME))
+                    {
+                        host_has_portability = TRUE;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (host_has_portability)
+        {
+            if (!find_extension(dst->ppEnabledExtensionNames, dst->enabledExtensionCount,
+                                VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME))
+                new_extensions[dst->enabledExtensionCount++] = VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME;
+            dst->flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
         }
     }
 

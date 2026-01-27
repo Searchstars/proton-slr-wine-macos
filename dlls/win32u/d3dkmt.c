@@ -23,6 +23,8 @@
 #include "config.h"
 
 #include <pthread.h>
+#include <stdlib.h>
+#include <string.h>
 
 #include "ntstatus.h"
 #define WIN32_NO_STATUS
@@ -66,20 +68,16 @@ static PFN_vkEnumeratePhysicalDevices pvkEnumeratePhysicalDevices;
 
 static void d3dkmt_init_vulkan(void)
 {
-    static const char *extensions[] =
-    {
-        VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME,
-        VK_KHR_EXTERNAL_MEMORY_CAPABILITIES_EXTENSION_NAME,
-    };
-    VkInstanceCreateInfo create_info =
-    {
-        .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
-        .enabledExtensionCount = ARRAY_SIZE( extensions ),
-        .ppEnabledExtensionNames = extensions,
-    };
+    const char *extensions[3];
+    unsigned int extension_count = 0;
+    VkInstanceCreateInfo create_info = {0};
+    PFN_vkEnumerateInstanceExtensionProperties p_vkEnumerateInstanceExtensionProperties;
     PFN_vkDestroyInstance p_vkDestroyInstance;
     PFN_vkCreateInstance p_vkCreateInstance;
+    VkExtensionProperties *host_exts = NULL;
+    uint32_t host_ext_count = 0;
     VkResult vr;
+    BOOL host_has_portability = FALSE;
 
     if (!vulkan_init())
     {
@@ -88,6 +86,40 @@ static void d3dkmt_init_vulkan(void)
     }
 
     p_vkCreateInstance = (PFN_vkCreateInstance)p_vkGetInstanceProcAddr( NULL, "vkCreateInstance" );
+    p_vkEnumerateInstanceExtensionProperties = (PFN_vkEnumerateInstanceExtensionProperties)
+            p_vkGetInstanceProcAddr( NULL, "vkEnumerateInstanceExtensionProperties" );
+
+    if (p_vkEnumerateInstanceExtensionProperties
+            && p_vkEnumerateInstanceExtensionProperties( NULL, &host_ext_count, NULL ) == VK_SUCCESS
+            && host_ext_count)
+    {
+        host_exts = calloc( host_ext_count, sizeof(*host_exts) );
+        if (host_exts && p_vkEnumerateInstanceExtensionProperties( NULL, &host_ext_count, host_exts ) == VK_SUCCESS)
+        {
+            unsigned int i;
+            for (i = 0; i < host_ext_count; i++)
+            {
+                if (!strcmp( host_exts[i].extensionName, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME ))
+                {
+                    host_has_portability = TRUE;
+                    break;
+                }
+            }
+        }
+        free( host_exts );
+    }
+
+    extensions[extension_count++] = VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME;
+    extensions[extension_count++] = VK_KHR_EXTERNAL_MEMORY_CAPABILITIES_EXTENSION_NAME;
+    if (host_has_portability)
+        extensions[extension_count++] = VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME;
+
+    create_info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+    create_info.enabledExtensionCount = extension_count;
+    create_info.ppEnabledExtensionNames = extensions;
+    if (host_has_portability)
+        create_info.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+
     if ((vr = p_vkCreateInstance( &create_info, NULL, &d3dkmt_vk_instance )))
     {
         WARN( "Failed to create a Vulkan instance, vr %d.\n", vr );
