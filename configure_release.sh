@@ -4,6 +4,25 @@ set -e
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 cd "$SCRIPT_DIR"
 
+if [ "$(uname -s 2>/dev/null)" = "Darwin" ] && [ "$(uname -m 2>/dev/null)" = "x86_64" ]; then
+  PKG_CONFIG_PATH_DEFAULTS=
+  for d in /usr/local/opt/freetype/lib/pkgconfig /usr/local/opt/libpng/lib/pkgconfig; do
+    [ -d "$d" ] || continue
+    case ":${PKG_CONFIG_PATH:-}:" in
+      *":$d:"*) ;;
+      *) PKG_CONFIG_PATH_DEFAULTS="${PKG_CONFIG_PATH_DEFAULTS:+$PKG_CONFIG_PATH_DEFAULTS:}$d" ;;
+    esac
+  done
+  if [ -n "$PKG_CONFIG_PATH_DEFAULTS" ]; then
+    if [ -n "${PKG_CONFIG_PATH:-}" ]; then
+      PKG_CONFIG_PATH="$PKG_CONFIG_PATH_DEFAULTS:$PKG_CONFIG_PATH"
+    else
+      PKG_CONFIG_PATH="$PKG_CONFIG_PATH_DEFAULTS"
+    fi
+    export PKG_CONFIG_PATH
+  fi
+fi
+
 if [ -z "${FREETYPE_CFLAGS:-}" ] && command -v pkg-config >/dev/null 2>&1; then
   FREETYPE_CFLAGS=$(pkg-config --cflags freetype2 2>/dev/null || true)
 fi

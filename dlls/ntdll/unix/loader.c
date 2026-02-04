@@ -578,10 +578,23 @@ char *get_alternate_wineloader( WORD machine )
     return remove_tail( wineloader, "64" );
 }
 
+static const char *rosetta_hook_path( void )
+{
+    const char *path = getenv( "ASTROWINE_ROSETTA_HOOKS_PATH" );
+    return (path && *path) ? path : NULL;
+}
 
 static void preloader_exec( char **argv )
 {
-    char *path;
+    const char *path;
+    /* Prefer rosettax87 hook when configured. */
+    path = rosetta_hook_path();
+    if (path)
+    {
+        argv[0] = strdup( path );
+        execv( argv[0], argv );
+        free( argv[0] );
+    }
 #ifdef HAVE_WINE_PRELOADER
     static const char *preloader = "wine-preloader";
     char *p;
@@ -606,13 +619,6 @@ static void preloader_exec( char **argv )
     execv( argv[0], argv );
     free( argv[0] );
 #endif
-    path = getenv( "ASTROWINE_ROSETTA_HOOKS_PATH" );
-    if (path)
-    {
-        argv[0] = strdup( path );
-        execv( argv[0], argv );
-        free( argv[0] );
-    }
     execv( argv[1], argv + 1 );
 }
 
@@ -2771,7 +2777,9 @@ DECLSPEC_EXPORT void __wine_main( int argc, char *argv[] )
     if (!getenv( "WINELOADERNOEXEC" ))  /* first time around */
     {
         check_command_line( argc, argv );
-        if (pre_exec())
+        int do_exec = pre_exec();
+        if (!do_exec && rosetta_hook_path()) do_exec = 1;
+        if (do_exec)
         {
             static char noexec[] = "WINELOADERNOEXEC=1";
             char **new_argv = malloc( (argc + 2) * sizeof(*argv) );

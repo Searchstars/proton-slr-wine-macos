@@ -4,7 +4,57 @@ set -e
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 cd "$SCRIPT_DIR"
 
+if [ "$(uname -s 2>/dev/null)" = "Darwin" ] && [ "$(uname -m 2>/dev/null)" = "x86_64" ]; then
+  PKG_CONFIG_PATH_DEFAULTS=
+  for d in /usr/local/opt/freetype/lib/pkgconfig /usr/local/opt/libpng/lib/pkgconfig; do
+    [ -d "$d" ] || continue
+    case ":${PKG_CONFIG_PATH:-}:" in
+      *":$d:"*) ;;
+      *) PKG_CONFIG_PATH_DEFAULTS="${PKG_CONFIG_PATH_DEFAULTS:+$PKG_CONFIG_PATH_DEFAULTS:}$d" ;;
+    esac
+  done
+  if [ -n "$PKG_CONFIG_PATH_DEFAULTS" ]; then
+    if [ -n "${PKG_CONFIG_PATH:-}" ]; then
+      PKG_CONFIG_PATH="$PKG_CONFIG_PATH_DEFAULTS:$PKG_CONFIG_PATH"
+    else
+      PKG_CONFIG_PATH="$PKG_CONFIG_PATH_DEFAULTS"
+    fi
+    export PKG_CONFIG_PATH
+  fi
+fi
+
 TOMCRYPT_INCLUDE_PATH=${TOMCRYPT_INCLUDE_PATH:-"-I./libs/tomcrypt/src/headers"}
+
+freetype_lib_has_x86_64() {
+  lib="$1/lib/libfreetype.dylib"
+  [ -f "$lib" ] || return 1
+  if command -v lipo >/dev/null 2>&1; then
+    info=$(lipo -info "$lib" 2>/dev/null || true)
+    case "$info" in
+      *x86_64*) return 0 ;;
+    esac
+    return 1
+  fi
+  if command -v file >/dev/null 2>&1; then
+    info=$(file -b "$lib" 2>/dev/null || true)
+    case "$info" in
+      *x86_64*) return 0 ;;
+    esac
+    return 1
+  fi
+  return 0
+}
+
+if [ "$(uname -s 2>/dev/null)" = "Darwin" ] && [ "$(uname -m 2>/dev/null)" = "x86_64" ]; then
+  if [ -n "${FREETYPE_PREFIX:-}" ] && ! freetype_lib_has_x86_64 "$FREETYPE_PREFIX"; then
+    if [ -d /usr/local/opt/freetype ] && freetype_lib_has_x86_64 /usr/local/opt/freetype; then
+      echo "configure_debug.sh: FREETYPE_PREFIX has no x86_64 lib; using /usr/local/opt/freetype" >&2
+      FREETYPE_PREFIX=/usr/local/opt/freetype
+    else
+      echo "configure_debug.sh: FREETYPE_PREFIX has no x86_64 lib; install an x86_64 freetype or set FREETYPE_PREFIX to it." >&2
+    fi
+  fi
+fi
 
 if [ -n "${FREETYPE_PREFIX:-}" ]; then
   FREETYPE_CFLAGS="-I${FREETYPE_PREFIX}/include/freetype2 -I${FREETYPE_PREFIX}/include/libpng16"
@@ -42,7 +92,7 @@ if [ -n "$BUILD_ENV_NEEDED" ]; then
 fi
 
 TOMCRYPT_PE_CFLAGS=${TOMCRYPT_PE_CFLAGS:-"$TOMCRYPT_INCLUDE_PATH"}
-TOMCRYPT_PE_LIBS=${TOMCRYPT_PE_LIBS:-tomcrypt}
+TOMCRYPT_PE_LIBS="-L$PWD/libs/tomcrypt/x86_64-windows -ltomcrypt"
 CPPFLAGS=${CPPFLAGS:-"$TOMCRYPT_INCLUDE_PATH"}
 CFLAGS=${CFLAGS:-"$TOMCRYPT_INCLUDE_PATH -O0 -g"}
 CXXFLAGS=${CXXFLAGS:-"$TOMCRYPT_INCLUDE_PATH -O0 -g"}
