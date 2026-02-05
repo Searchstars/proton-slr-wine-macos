@@ -23,6 +23,7 @@
 
 #include <pthread.h>
 #include <signal.h>
+#include <stdint.h>
 #include "unixlib.h"
 #include "wine/unixlib.h"
 #include "wine/server.h"
@@ -75,6 +76,25 @@ static inline TEB64 *NtCurrentTeb64(void) { return (TEB64 *)NtCurrentTeb()->GdiB
 extern WOW_PEB *wow_peb;
 extern ULONG_PTR user_space_wow_limit;
 extern SECTION_IMAGE_INFORMATION main_image_info;
+
+#define ROSETTA_WINE_CONTROL_MAGIC0  UINT64_C(0x57524f5345545441) /* "WROSETTA" */
+#define ROSETTA_WINE_CONTROL_MAGIC1  UINT64_C(0x57494e45434f4e54) /* "WINECONT" */
+#define ROSETTA_WINE_CONTROL_VERSION 1u
+
+struct rosetta_wine_control
+{
+    uint64_t magic0;
+    uint64_t magic1;
+    uint32_t version;
+    uint32_t size;
+    uint64_t main_image_base;
+    uint64_t main_image_size;
+    uint64_t exception_pending;
+    uint64_t exception_x86_addr;
+    uint64_t exception_arm_pc;
+};
+
+extern struct rosetta_wine_control rosetta_wine_control;
 
 static inline WOW_TEB *get_wow_teb( TEB *teb )
 {

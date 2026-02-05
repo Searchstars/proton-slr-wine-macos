@@ -33,6 +33,7 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <sys/types.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -3004,6 +3005,20 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
     struct xcontext context;
     ucontext_t *ucontext = init_handler( sigcontext );
     void *steamclient_addr = NULL;
+
+    if (__atomic_exchange_n( &rosetta_wine_control.exception_pending, 0, __ATOMIC_ACQ_REL ))
+    {
+        const uint64_t addr = rosetta_wine_control.exception_x86_addr;
+        RIP_sig(ucontext) = (intptr_t)addr;
+        rec.ExceptionAddress = (void *)addr;
+        rec.ExceptionCode = EXCEPTION_ACCESS_VIOLATION;
+        rec.NumberParameters = 2;
+        rec.ExceptionInformation[0] = 0;
+        rec.ExceptionInformation[1] = (ULONG_PTR)addr;
+        save_context( &context, ucontext );
+        setup_raise_exception( ucontext, &rec, &context );
+        return;
+    }
 
     rec.ExceptionAddress = (void *)RIP_sig(ucontext);
     save_context( &context, ucontext );
