@@ -5008,7 +5008,8 @@ static inline bool wined3d_map_persistent(void)
 }
 
 /* The WNDCLASS-Name for the fake window which we use to retrieve the GL capabilities */
-#define WINED3D_OPENGL_WINDOW_CLASS_NAME "WineD3D_OpenGL"
+#define WINED3D_OPENGL_WINDOW_CLASS_NAME "OpenGLCompatWindowClass"
+#define WINED3D_OPENGL_WINDOW_TITLE "OpenGL Renderer"
 
 extern CRITICAL_SECTION wined3d_command_cs;
 

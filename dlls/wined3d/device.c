@@ -1469,7 +1469,8 @@ void wined3d_device_gl_delete_opengl_contexts_cs(void *object)
         TRACE("Destroying backup wined3d window %p, dc %p.\n", device_gl->backup_wnd, device_gl->backup_dc);
 
         wined3d_release_dc(device_gl->backup_wnd, device_gl->backup_dc);
-        DestroyWindow(device_gl->backup_wnd);
+        if (device_gl->backup_wnd_owned)
+            DestroyWindow(device_gl->backup_wnd);
     }
 }
 
@@ -5337,18 +5338,40 @@ HDC wined3d_device_gl_get_backup_dc(struct wined3d_device_gl *device_gl)
     {
         TRACE("Creating the backup window for device %p.\n", device_gl);
 
-        if (!(device_gl->backup_wnd = CreateWindowA(WINED3D_OPENGL_WINDOW_CLASS_NAME, "WineD3D fake window",
-                WS_OVERLAPPEDWINDOW, 10, 10, 10, 10, NULL, NULL, NULL, NULL)))
+        device_gl->backup_wnd_owned = FALSE;
+        SetLastError(ERROR_SUCCESS);
+        device_gl->backup_wnd = CreateWindowA(WINED3D_OPENGL_WINDOW_CLASS_NAME, WINED3D_OPENGL_WINDOW_TITLE,
+                WS_OVERLAPPEDWINDOW, 10, 10, 10, 10, NULL, NULL, NULL, NULL);
+        if (!device_gl->backup_wnd)
         {
-            ERR("Failed to create a window.\n");
-            return NULL;
+            WARN("CreateWindowA(\"%s\") failed, last error %#lx. Retrying as child window.\n",
+                    WINED3D_OPENGL_WINDOW_CLASS_NAME, GetLastError());
+            SetLastError(ERROR_SUCCESS);
+            device_gl->backup_wnd = CreateWindowA(WINED3D_OPENGL_WINDOW_CLASS_NAME, WINED3D_OPENGL_WINDOW_TITLE,
+                    WS_CHILD, 0, 0, 16, 16, GetDesktopWindow(), NULL, NULL, NULL);
+        }
+        if (device_gl->backup_wnd)
+        {
+            device_gl->backup_wnd_owned = TRUE;
+        }
+        else
+        {
+            device_gl->backup_wnd = GetShellWindow();
+            if (!device_gl->backup_wnd)
+                device_gl->backup_wnd = GetForegroundWindow();
+            if (!device_gl->backup_wnd)
+                device_gl->backup_wnd = GetDesktopWindow();
+            WARN("Failed to create a backup window, last error %#lx. Falling back to existing window %p.\n",
+                    GetLastError(), device_gl->backup_wnd);
         }
 
         if (!(device_gl->backup_dc = GetDC(device_gl->backup_wnd)))
         {
-            ERR("Failed to get a DC.\n");
-            DestroyWindow(device_gl->backup_wnd);
+            ERR("Failed to get a DC, last error %#lx.\n", GetLastError());
+            if (device_gl->backup_wnd_owned)
+                DestroyWindow(device_gl->backup_wnd);
             device_gl->backup_wnd = NULL;
+            device_gl->backup_wnd_owned = FALSE;
             return NULL;
         }
     }

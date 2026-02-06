@@ -3349,16 +3349,16 @@ static void sigsys_handler( int signal, siginfo_t *siginfo, void *sigcontext )
     ucontext_t *ucontext = init_handler( sigcontext );
     struct syscall_frame *frame = amd64_thread_data()->syscall_frame;
     struct astrowine_shm *shm = astrowine_get_shm();
+    UINT64 trap_rax = RAX_sig(ucontext);
+    UINT64 trap_rip = RIP_sig(ucontext);
+    UINT64 trap_eflags = EFL_sig(ucontext);
 
     /* If a Rosetta-side hook raised SIGSYS, override the trap context from shared memory. */
-    if (shm && shm->magic == ASTROWINE_SHM_MAGIC && shm->version == ASTROWINE_SHM_VERSION && shm->pending)
+    if (shm && shm->magic == ASTROWINE_SHM_MAGIC && shm->version == ASTROWINE_SHM_VERSION &&
+        __atomic_load_n( &shm->pending, __ATOMIC_ACQUIRE ) == 1)
     {
-        const UINT64 nr = shm->syscall_nr;
-        const UINT64 rip = shm->syscall_rip;
-
-        shm->pending = 0;
-        RAX_sig(ucontext) = nr;
-        if (rip) RIP_sig(ucontext) = rip;
+        trap_rax = shm->syscall_nr;
+        if (shm->syscall_rip) trap_rip = shm->syscall_rip;
         RBX_sig(ucontext) = shm->rbx;
         RDX_sig(ucontext) = shm->rdx;
         RSI_sig(ucontext) = shm->rsi;
@@ -3372,18 +3372,34 @@ static void sigsys_handler( int signal, siginfo_t *siginfo, void *sigcontext )
         R13_sig(ucontext) = shm->r13;
         R14_sig(ucontext) = shm->r14;
         R15_sig(ucontext) = shm->r15;
+        __atomic_store_n( &shm->pending, 0, __ATOMIC_RELEASE );
+
+        RAX_sig(ucontext) = trap_rax;
+        RIP_sig(ucontext) = trap_rip;
     }
 
-    TRACE_(seh)("SIGSYS, rax %#llx, rip %#llx.\n", RAX_sig(ucontext), RIP_sig(ucontext));
+    TRACE_(seh)("SIGSYS, rax %#llx, rip %#llx.\n", (unsigned long long)trap_rax,
+                (unsigned long long)trap_rip);
 
-    frame->rip = RIP_sig(ucontext) + 0xb;
-    frame->rcx = RIP_sig(ucontext);
-    frame->eflags = EFL_sig(ucontext);
+    /* Keep parity with Linux install_bpf test path. */
+    if (trap_rax == 0xffff)
+    {
+        RAX_sig(ucontext) = STATUS_INVALID_PARAMETER;
+        return;
+    }
+
+    frame->rip = trap_rip + 0xb;
+    frame->rcx = trap_rip;
+    frame->eflags = trap_eflags;
     frame->restore_flags = 0;
     if (instrumentation_callback) frame->restore_flags |= RESTORE_FLAGS_INSTRUMENTATION;
     RCX_sig(ucontext) = (ULONG_PTR)frame;
     R11_sig(ucontext) = frame->eflags;
-    EFL_sig(ucontext) &= ~0x100;  /* clear single-step flag */
+    if (trap_eflags & 0x100)
+    {
+        EFL_sig(ucontext) &= ~0x100;  /* clear single-step flag */
+        frame->restore_flags |= CONTEXT_CONTROL;
+    }
     RIP_sig(ucontext) = (ULONG64)__wine_syscall_dispatcher_prolog_end_ptr;
 }
 #endif

@@ -779,6 +779,7 @@ struct wined3d_caps_gl_ctx
 {
     HDC dc;
     HWND wnd;
+    BOOL window_owned;
     HGLRC gl_ctx;
     HDC restore_dc;
     HGLRC restore_gl_ctx;
@@ -866,6 +867,7 @@ struct wined3d_device_gl
 
     HWND backup_wnd;
     HDC backup_dc;
+    BOOL backup_wnd_owned;
 };
 
 static inline struct wined3d_device_gl *wined3d_device_gl(struct wined3d_device *device)

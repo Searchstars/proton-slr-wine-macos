@@ -308,7 +308,7 @@ static BOOL wined3d_dll_init(HINSTANCE hInstDLL)
 
     if (!RegisterClassA(&wc))
     {
-        ERR("Failed to register window class 'WineD3D_OpenGL'!\n");
+        ERR("Failed to register window class '%s'!\n", WINED3D_OPENGL_WINDOW_CLASS_NAME);
         if (!TlsFree(wined3d_context_tls_idx))
         {
             unsigned int err = GetLastError();

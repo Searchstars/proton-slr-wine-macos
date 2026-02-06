@@ -272,7 +272,8 @@ static void wined3d_caps_gl_ctx_destroy(const struct wined3d_caps_gl_ctx *ctx)
     }
 
     wined3d_release_dc(ctx->wnd, ctx->dc);
-    DestroyWindow(ctx->wnd);
+    if (ctx->window_owned)
+        DestroyWindow(ctx->wnd);
 
     if (ctx->restore_gl_ctx && !wglMakeCurrent(ctx->restore_dc, ctx->restore_gl_ctx))
         ERR("Failed to restore previous GL context.\n");
@@ -319,12 +320,32 @@ static BOOL wined3d_caps_gl_ctx_create(struct wined3d_adapter_gl *adapter_gl, st
     ctx->restore_gl_ctx = wglGetCurrentContext();
 
     /* We need a fake window as a hdc retrieved using GetDC(0) can't be used for much GL purposes. */
-    ctx->wnd = CreateWindowA(WINED3D_OPENGL_WINDOW_CLASS_NAME, "WineD3D fake window",
+    ctx->window_owned = FALSE;
+
+    SetLastError(ERROR_SUCCESS);
+    ctx->wnd = CreateWindowA(WINED3D_OPENGL_WINDOW_CLASS_NAME, WINED3D_OPENGL_WINDOW_TITLE,
             WS_OVERLAPPEDWINDOW, 10, 10, 10, 10, NULL, NULL, NULL, NULL);
     if (!ctx->wnd)
     {
-        ERR("Failed to create a window.\n");
-        goto fail;
+        WARN("CreateWindowA(\"%s\") failed, last error %#lx. Retrying as child window.\n",
+                WINED3D_OPENGL_WINDOW_CLASS_NAME, GetLastError());
+        SetLastError(ERROR_SUCCESS);
+        ctx->wnd = CreateWindowA(WINED3D_OPENGL_WINDOW_CLASS_NAME, WINED3D_OPENGL_WINDOW_TITLE,
+                WS_CHILD, 0, 0, 16, 16, GetDesktopWindow(), NULL, NULL, NULL);
+    }
+    if (!ctx->wnd)
+    {
+        ctx->wnd = GetShellWindow();
+        if (!ctx->wnd)
+            ctx->wnd = GetForegroundWindow();
+        if (!ctx->wnd)
+            ctx->wnd = GetDesktopWindow();
+        WARN("Failed to create a helper window, last error %#lx. Falling back to existing window %p.\n",
+                GetLastError(), ctx->wnd);
+    }
+    else
+    {
+        ctx->window_owned = TRUE;
     }
 
     ctx->dc = GetDC(ctx->wnd);
@@ -374,7 +395,7 @@ fail:
     ctx->gl_ctx = NULL;
     if (ctx->dc) ReleaseDC(ctx->wnd, ctx->dc);
     ctx->dc = NULL;
-    if (ctx->wnd) DestroyWindow(ctx->wnd);
+    if (ctx->wnd && ctx->window_owned) DestroyWindow(ctx->wnd);
     ctx->wnd = NULL;
     if (ctx->restore_gl_ctx && !wglMakeCurrent(ctx->restore_dc, ctx->restore_gl_ctx))
         ERR("Failed to restore previous GL context.\n");
