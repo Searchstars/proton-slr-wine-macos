@@ -29,7 +29,6 @@
 #include <fcntl.h>
 #include <stdarg.h>
 #include <stdio.h>
-#include <pthread.h>
 #include <signal.h>
 #include <spawn.h>
 #include <string.h>
@@ -177,60 +176,8 @@ struct rosetta_wine_control rosetta_wine_control __attribute__((used)) =
     0,
     0,
     0,
-    0,
-    0,
-    0,
-    0,
     0
 };
-
-static void *rosetta_wine_control_logger( void *arg )
-{
-    const unsigned long interval_ms = (unsigned long)(ULONG_PTR)arg;
-    uint64_t last_map = 0;
-    uint64_t last_list = 0;
-
-    fprintf( stderr, "rosetta inline: pid=%d logger started (%lums)\n", (int)getpid(), interval_ms );
-    for (;;)
-    {
-        if (interval_ms) usleep( interval_ms * 1000 );
-        const uint64_t map = __atomic_load_n( &rosetta_wine_control.map_write_count, __ATOMIC_RELAXED );
-        const uint64_t list = __atomic_load_n( &rosetta_wine_control.list_write_count, __ATOMIC_RELAXED );
-        if (map == last_map && list == last_list) continue;
-
-        last_map = map;
-        last_list = list;
-        const uint64_t x86 = __atomic_load_n( &rosetta_wine_control.last_x86_addr, __ATOMIC_RELAXED );
-        const uint64_t arm = __atomic_load_n( &rosetta_wine_control.last_arm_pc, __ATOMIC_RELAXED );
-        fprintf( stderr,
-                 "rosetta inline: pid=%d map=%llu list=%llu last_x86=0x%llx last_arm=0x%llx\n",
-                 (int)getpid(),
-                 (unsigned long long)map,
-                 (unsigned long long)list,
-                 (unsigned long long)x86,
-                 (unsigned long long)arm );
-    }
-    return NULL;
-}
-
-static void maybe_start_rosetta_logger( void )
-{
-    static int started;
-    if (started) return;
-    const char *env = getenv( "ASTROWINE_INLINE_STATE_LOG_MS" );
-    if (!env || !*env) return;
-
-    char *end = NULL;
-    const unsigned long interval_ms = strtoul( env, &end, 0 );
-    if (end == env || interval_ms == 0) return;
-
-    pthread_t tid;
-    if (!pthread_create( &tid, NULL, rosetta_wine_control_logger, (void *)(ULONG_PTR)interval_ms ))
-    {
-        pthread_detach( tid );
-        started = 1;
-    }
-}
 
 /* adjust an array of pointers to make them into RVAs */
 static inline void fixup_rva_ptrs( void *array, BYTE *base, unsigned int count )
@@ -285,7 +232,6 @@ static inline void update_rosetta_wine_control( void *module, SIZE_T size )
 {
     rosetta_wine_control.main_image_base = (uint64_t)(ULONG_PTR)module;
     rosetta_wine_control.main_image_size = (uint64_t)size;
-    maybe_start_rosetta_logger();
 }
 
 static void set_max_limit( int limit )

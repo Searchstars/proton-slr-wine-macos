@@ -92,10 +92,6 @@ struct rosetta_wine_control
     uint64_t exception_pending;
     uint64_t exception_x86_addr;
     uint64_t exception_arm_pc;
-    uint64_t map_write_count;
-    uint64_t list_write_count;
-    uint64_t last_x86_addr;
-    uint64_t last_arm_pc;
 };
 
 extern struct rosetta_wine_control rosetta_wine_control;
