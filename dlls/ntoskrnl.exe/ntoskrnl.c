@@ -56,6 +56,8 @@ KSERVICE_TABLE_DESCRIPTOR KeServiceDescriptorTable[4] = { { 0 } };
 
 #define MAX_SERVICE_NAME 260
 
+typedef ULONG_PTR (WINAPI *PKIPI_BROADCAST_WORKER)(ULONG_PTR context);
+
 static TP_POOL *dpc_call_tp;
 static TP_CALLBACK_ENVIRON dpc_call_tpe;
 DECLARE_CRITICAL_SECTION(dpc_call_cs);
@@ -2632,6 +2634,50 @@ PACCESS_TOKEN WINAPI PsReferencePrimaryToken( PEPROCESS process )
     return process->token;
 }
 
+/*********************************************************************
+ *           SeQueryInformationToken   (NTOSKRNL.@)
+ */
+NTSTATUS WINAPI SeQueryInformationToken( PACCESS_TOKEN token, TOKEN_INFORMATION_CLASS class,
+                                         void **token_info )
+{
+    HANDLE handle;
+    NTSTATUS status;
+    ULONG len = 0;
+    void *buffer;
+
+    TRACE( "token %p, class %u, token_info %p\n", token, class, token_info );
+
+    if (!token || !token_info) return STATUS_INVALID_PARAMETER;
+    *token_info = NULL;
+
+    status = ObOpenObjectByPointer( token, 0, NULL, TOKEN_QUERY, SeTokenObjectType, KernelMode, &handle );
+    if (status) return status;
+
+    status = NtQueryInformationToken( handle, class, NULL, 0, &len );
+    if (status != STATUS_BUFFER_TOO_SMALL && status != STATUS_BUFFER_OVERFLOW)
+    {
+        NtClose( handle );
+        return status;
+    }
+
+    if (!(buffer = ExAllocatePool( PagedPool, len )))
+    {
+        NtClose( handle );
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    status = NtQueryInformationToken( handle, class, buffer, len, &len );
+    NtClose( handle );
+    if (status)
+    {
+        ExFreePool( buffer );
+        return status;
+    }
+
+    *token_info = buffer;
+    return STATUS_SUCCESS;
+}
+
 static void *create_thread_object( HANDLE handle )
 {
     THREAD_BASIC_INFORMATION info;
@@ -2720,8 +2766,21 @@ NTSTATUS WINAPI PsLookupThreadByThreadId( HANDLE threadid, PETHREAD *thread )
 /*********************************************************************
  *           PsGetThreadId    (NTOSKRNL.@)
  */
+static PETHREAD get_safe_thread( PETHREAD thread )
+{
+    if (!thread || (ULONG_PTR)thread < 0x10000)
+    {
+        TRACE( "invalid thread %p, falling back to current thread\n", thread );
+        thread = (PETHREAD)KeGetCurrentThread();
+    }
+    return thread;
+}
+
 HANDLE WINAPI PsGetThreadId(PETHREAD thread)
 {
+    thread = get_safe_thread( thread );
+    if (!thread) return 0;
+
     TRACE( "%p -> %p\n", thread, thread->kthread.id.UniqueThread );
     return thread->kthread.id.UniqueThread;
 }
@@ -2731,6 +2790,9 @@ HANDLE WINAPI PsGetThreadId(PETHREAD thread)
  */
 PEPROCESS WINAPI PsGetThreadProcess(PETHREAD thread)
 {
+    thread = get_safe_thread( thread );
+    if (!thread) return NULL;
+
     TRACE("%p -> %p\n", thread, thread->kthread.process);
     return thread->kthread.process;
 }
@@ -2740,6 +2802,9 @@ PEPROCESS WINAPI PsGetThreadProcess(PETHREAD thread)
  */
 HANDLE WINAPI PsGetThreadProcessId( PETHREAD thread )
 {
+    thread = get_safe_thread( thread );
+    if (!thread) return 0;
+
     TRACE( "%p -> %p\n", thread, thread->kthread.id.UniqueProcess );
     return thread->kthread.id.UniqueProcess;
 }
@@ -2800,6 +2865,15 @@ BOOLEAN WINAPI KeInsertQueueDpc(PRKDPC Dpc, PVOID SystemArgument1, PVOID SystemA
     return TRUE;
 }
 
+/***********************************************************************
+ *           KeRemoveQueueApc   (NTOSKRNL.EXE.@)
+ */
+BOOLEAN WINAPI KeRemoveQueueApc( PKAPC apc )
+{
+    TRACE( "apc %p.\n", apc );
+    return TRUE;
+}
+
 /**********************************************************************
  *           KeQueryActiveProcessors   (NTOSKRNL.EXE.@)
  *
@@ -2848,6 +2922,37 @@ ULONGLONG WINAPI KeQueryInterruptTime( void )
     return totaltime.QuadPart;
 }
 
+/**********************************************************************
+ *           KeQueryPerformanceCounter   (NTOSKRNL.EXE.@)
+ */
+LARGE_INTEGER WINAPI KeQueryPerformanceCounter( LARGE_INTEGER *frequency )
+{
+    LARGE_INTEGER counter = {0};
+    NtQueryPerformanceCounter( &counter, frequency );
+    return counter;
+}
+
+/**********************************************************************
+ *           KeQueryUnbiasedInterruptTime   (NTOSKRNL.EXE.@)
+ */
+ULONGLONG WINAPI KeQueryUnbiasedInterruptTime(void)
+{
+    return KeQueryInterruptTime();
+}
+
+/***********************************************************************
+ *           KeQueryPrcbAddress   (NTOSKRNL.EXE.@)
+ */
+void *WINAPI KeQueryPrcbAddress( ULONG processor_number )
+{
+    static ULONG_PTR fake_prcbs[64];
+    const ULONG index = processor_number % ARRAY_SIZE(fake_prcbs);
+
+    fake_prcbs[index] = processor_number;
+    TRACE( "processor_number %lu -> %p\n", processor_number, (void *)&fake_prcbs[index] );
+    return &fake_prcbs[index];
+}
+
 /***********************************************************************
  *           KeQueryPriorityThread   (NTOSKRNL.EXE.@)
  */
@@ -2886,6 +2991,22 @@ void WINAPI KeQueryTickCount( LARGE_INTEGER *count )
 ULONG WINAPI KeQueryTimeIncrement(void)
 {
     return 10000;
+}
+
+/***********************************************************************
+ *           ExQueryTimerResolution   (NTOSKRNL.EXE.@)
+ */
+ULONG WINAPI ExQueryTimerResolution( ULONG *max_time, ULONG *min_time, ULONG *current_time )
+{
+    /* 100ns units */
+    const ULONG max_res = 156250;  /* 15.625 ms */
+    const ULONG min_res = 5000;    /* 0.5 ms */
+    const ULONG cur_res = KeQueryTimeIncrement();
+
+    if (max_time) *max_time = max_res;
+    if (min_time) *min_time = min_res;
+    if (current_time) *current_time = cur_res;
+    return cur_res;
 }
 
 
@@ -3160,6 +3281,60 @@ PVOID WINAPI MmMapIoSpace( PHYSICAL_ADDRESS PhysicalAddress, DWORD NumberOfBytes
     return NULL;
 }
 
+/***********************************************************************
+ *           MmMapIoSpaceEx   (NTOSKRNL.EXE.@)
+ */
+PVOID WINAPI MmMapIoSpaceEx( LONGLONG physical_address, SIZE_T number_of_bytes, ULONG protect )
+{
+    PHYSICAL_ADDRESS pa;
+    PVOID ret;
+
+    pa.QuadPart = physical_address;
+    ret = MmMapIoSpace( pa, (DWORD)number_of_bytes, protect );
+    if (!ret) ret = (void *)(ULONG_PTR)pa.QuadPart;
+    return ret;
+}
+
+/***********************************************************************
+ *           MmCopyMemory   (NTOSKRNL.EXE.@)
+ */
+NTSTATUS WINAPI MmCopyMemory( void *target_address, const void *source_address, SIZE_T number_of_bytes,
+                              ULONG flags, SIZE_T *number_of_bytes_transferred )
+{
+    const void *src = source_address;
+    static const ULONG MM_COPY_MEMORY_PHYSICAL = 0x2;
+
+    if (number_of_bytes_transferred) *number_of_bytes_transferred = 0;
+    if (!target_address || !source_address) return STATUS_INVALID_PARAMETER;
+
+    if (flags & MM_COPY_MEMORY_PHYSICAL) src = (const void *)(ULONG_PTR)source_address;
+    if (IsBadReadPtr( src, number_of_bytes ) || IsBadWritePtr( target_address, number_of_bytes ))
+        return STATUS_ACCESS_VIOLATION;
+
+    memcpy( target_address, src, number_of_bytes );
+    if (number_of_bytes_transferred) *number_of_bytes_transferred = number_of_bytes;
+    return STATUS_SUCCESS;
+}
+
+/***********************************************************************
+ *           MmSecureVirtualMemory   (NTOSKRNL.EXE.@)
+ */
+PVOID WINAPI MmSecureVirtualMemory( PVOID address, SIZE_T size, ULONG probe_mode )
+{
+    TRACE( "address %p, size %Iu, probe_mode %#lx\n", address, size, probe_mode );
+    if (!address || IsBadReadPtr( address, size )) return NULL;
+    return address;
+}
+
+/***********************************************************************
+ *           MmSecureVirtualMemoryEx   (NTOSKRNL.EXE.@)
+ */
+PVOID WINAPI MmSecureVirtualMemoryEx( PVOID address, SIZE_T size, ULONG probe_mode, ULONG flags )
+{
+    TRACE( "address %p, size %Iu, probe_mode %#lx, flags %#lx\n", address, size, probe_mode, flags );
+    return MmSecureVirtualMemory( address, size, probe_mode );
+}
+
 
 /***********************************************************************
  *           MmLockPagableSectionByHandle  (NTOSKRNL.EXE.@)
@@ -3352,6 +3527,30 @@ void FASTCALL ObfDereferenceObject( void *obj )
 }
 
 /***********************************************************************
+ *           ObDereferenceObjectDeferDelete   (NTOSKRNL.EXE.@)
+ */
+void WINAPI ObDereferenceObjectDeferDelete( void *obj )
+{
+    TRACE( "%p\n", obj );
+    ObDereferenceObject( obj );
+}
+
+/***********************************************************************
+ *           CcCoherencyFlushAndPurgeCache   (NTOSKRNL.EXE.@)
+ */
+void WINAPI CcCoherencyFlushAndPurgeCache( void *section_ptrs, LARGE_INTEGER *file_offset,
+                                           ULONG length, IO_STATUS_BLOCK *io_status, ULONG flags )
+{
+    TRACE( "section_ptrs %p, file_offset %p, length %lu, io_status %p, flags %#lx\n",
+           section_ptrs, file_offset, length, io_status, flags );
+    if (io_status)
+    {
+        io_status->Status = STATUS_SUCCESS;
+        io_status->Information = 0;
+    }
+}
+
+/***********************************************************************
  *           ObRegisterCallbacks (NTOSKRNL.EXE.@)
  */
 NTSTATUS WINAPI ObRegisterCallbacks(POB_CALLBACK_REGISTRATION callback, void **handle)
@@ -3429,6 +3628,30 @@ ULONG WINAPI PsGetCurrentProcessSessionId(void)
 HANDLE WINAPI PsGetCurrentThreadId(void)
 {
     return KeGetCurrentThread()->id.UniqueThread;
+}
+
+/***********************************************************************
+ *           PsGetCurrentThreadProcessId   (NTOSKRNL.EXE.@)
+ */
+HANDLE WINAPI PsGetCurrentThreadProcessId(void)
+{
+    return KeGetCurrentThread()->id.UniqueProcess;
+}
+
+/***********************************************************************
+ *           PsGetCurrentThreadProcess   (NTOSKRNL.EXE.@)
+ */
+PEPROCESS WINAPI PsGetCurrentThreadProcess(void)
+{
+    return KeGetCurrentThread()->process;
+}
+
+/***********************************************************************
+ *           PsGetCurrentThreadTeb   (NTOSKRNL.EXE.@)
+ */
+void *WINAPI PsGetCurrentThreadTeb(void)
+{
+    return NtCurrentTeb();
 }
 
 
@@ -4416,6 +4639,36 @@ NTSTATUS WINAPI IoCreateFile(HANDLE *handle, ACCESS_MASK access, OBJECT_ATTRIBUT
                           create_options, ea_buffer, ea_length, file_type, parameters, options, NULL);
 }
 
+/***********************************************************************
+ *           IoQueryFullDriverPath   (NTOSKRNL.EXE.@)
+ */
+NTSTATUS WINAPI IoQueryFullDriverPath( DRIVER_OBJECT *driver, UNICODE_STRING **path )
+{
+    const WCHAR *name = driver && driver->DriverName.Buffer ? driver->DriverName.Buffer : L"\\Driver\\ntoskrnl";
+    const SIZE_T len = wcslen( name );
+    UNICODE_STRING *out;
+
+    TRACE( "driver %p, path %p\n", driver, path );
+    if (!path) return STATUS_INVALID_PARAMETER;
+
+    out = ExAllocatePool( PagedPool, sizeof(*out) );
+    if (!out) return STATUS_NO_MEMORY;
+
+    out->Buffer = ExAllocatePool( PagedPool, (len + 1) * sizeof(WCHAR) );
+    if (!out->Buffer)
+    {
+        ExFreePool( out );
+        return STATUS_NO_MEMORY;
+    }
+
+    memcpy( out->Buffer, name, len * sizeof(WCHAR) );
+    out->Buffer[len] = 0;
+    out->Length = len * sizeof(WCHAR);
+    out->MaximumLength = (len + 1) * sizeof(WCHAR);
+    *path = out;
+    return STATUS_SUCCESS;
+}
+
 /**************************************************************************
  *		__chkstk (NTOSKRNL.@)
  */
@@ -4468,6 +4721,22 @@ void FASTCALL ExfUnblockPushLock( EX_PUSH_LOCK *lock, PEX_PUSH_LOCK_WAIT_BLOCK b
 }
 
 /*********************************************************************
+ *           ExAcquirePushLockSharedEx    (NTOSKRNL.@)
+ */
+void WINAPI ExAcquirePushLockSharedEx( EX_PUSH_LOCK *lock, ULONG flags )
+{
+    TRACE( "lock %p, flags %#lx\n", lock, flags );
+}
+
+/*********************************************************************
+ *           ExReleasePushLockSharedEx    (NTOSKRNL.@)
+ */
+void WINAPI ExReleasePushLockSharedEx( EX_PUSH_LOCK *lock, ULONG flags )
+{
+    TRACE( "lock %p, flags %#lx\n", lock, flags );
+}
+
+/*********************************************************************
  *           FsRtlRegisterFileSystemFilterCallbacks    (NTOSKRNL.@)
  */
 NTSTATUS WINAPI FsRtlRegisterFileSystemFilterCallbacks( DRIVER_OBJECT *object, PFS_FILTER_CALLBACKS callbacks)
@@ -4493,6 +4762,15 @@ BOOLEAN WINAPI SePrivilegeCheck(PRIVILEGE_SET *privileges, SECURITY_SUBJECT_CONT
 {
     FIXME("stub: %p %p %u\n", privileges, context, mode);
     return TRUE;
+}
+
+/*********************************************************************
+ *           SeSetAuditParameter    (NTOSKRNL.@)
+ */
+NTSTATUS WINAPI SeSetAuditParameter( void *audit_parameters, ULONG type, void *data )
+{
+    TRACE( "audit_parameters %p, type %lu, data %p\n", audit_parameters, type, data );
+    return STATUS_SUCCESS;
 }
 
 /*********************************************************************
@@ -4554,6 +4832,50 @@ NTSTATUS WINAPI DbgQueryDebugFilterState(ULONG component, ULONG level)
 {
     FIXME("stub: %ld %ld\n", component, level);
     return STATUS_NOT_IMPLEMENTED;
+}
+
+/*********************************************************************
+ *           DbgCommandString    (NTOSKRNL.@)
+ */
+NTSTATUS WINAPI DbgCommandString( const char *command, ULONG length )
+{
+    TRACE( "command %s, length %lu\n", debugstr_an(command, length), length );
+    return STATUS_SUCCESS;
+}
+
+/*********************************************************************
+ *           VslGetSecurePciEnabled    (NTOSKRNL.@)
+ */
+BOOLEAN WINAPI VslGetSecurePciEnabled(void)
+{
+    return FALSE;
+}
+
+/***********************************************************************
+ *           ExGetFirmwareEnvironmentVariable   (NTOSKRNL.EXE.@)
+ */
+NTSTATUS WINAPI ExGetFirmwareEnvironmentVariable( UNICODE_STRING *name, GUID *guid, void *value,
+                                                  ULONG *value_len, ULONG *attributes )
+{
+    TRACE( "name %s, guid %s, value %p, value_len %p, attributes %p\n",
+           debugstr_us(name), debugstr_guid(guid), value, value_len, attributes );
+    if (value_len) *value_len = 0;
+    if (attributes) *attributes = 0;
+    return STATUS_VARIABLE_NOT_FOUND;
+}
+
+/***********************************************************************
+ *           HalGetEnvironmentVariableEx   (NTOSKRNL.EXE.@)
+ */
+NTSTATUS WINAPI HalGetEnvironmentVariableEx( USHORT name_len, WCHAR *name, GUID *guid, void *value,
+                                             ULONG *value_len, ULONG *attributes )
+{
+    UNICODE_STRING var_name;
+
+    var_name.Buffer = name;
+    var_name.Length = name_len;
+    var_name.MaximumLength = name_len;
+    return ExGetFirmwareEnvironmentVariable( &var_name, guid, value, value_len, attributes );
 }
 
 /*********************************************************************
@@ -4791,6 +5113,62 @@ void WINAPI KeGenericCallDpc(PKDEFERRED_ROUTINE routine, void *context)
         SwitchToThread();
 
     LeaveCriticalSection(&dpc_call_cs);
+}
+
+/***********************************************************************
+ *           KeIpiGenericCall   (NTOSKRNL.EXE.@)
+ */
+ULONG_PTR WINAPI KeIpiGenericCall(PKIPI_BROADCAST_WORKER worker, ULONG_PTR context)
+{
+    TRACE("worker %p, context %p.\n", worker, (void *)context);
+    if (!worker) return 0;
+    return worker(context);
+}
+
+/***********************************************************************
+ *           KeSetSystemGroupAffinityThread   (NTOSKRNL.EXE.@)
+ */
+void WINAPI KeSetSystemGroupAffinityThread(GROUP_AFFINITY *affinity, GROUP_AFFINITY *old_affinity)
+{
+    TRACE("affinity %p, old_affinity %p.\n", affinity, old_affinity);
+
+    if (old_affinity)
+    {
+        if (NtQueryInformationThread(GetCurrentThread(), ThreadGroupInformation, old_affinity,
+                                     sizeof(*old_affinity), NULL))
+            memset(old_affinity, 0, sizeof(*old_affinity));
+    }
+
+    if (affinity)
+        NtSetInformationThread(GetCurrentThread(), ThreadGroupInformation, affinity, sizeof(*affinity));
+}
+
+/***********************************************************************
+ *           KeRevertToUserGroupAffinityThread   (NTOSKRNL.EXE.@)
+ */
+void WINAPI KeRevertToUserGroupAffinityThread(GROUP_AFFINITY *affinity)
+{
+    TRACE("affinity %p.\n", affinity);
+    if (affinity)
+        NtSetInformationThread(GetCurrentThread(), ThreadGroupInformation, affinity, sizeof(*affinity));
+}
+
+/***********************************************************************
+ *           KeGetProcessorNumberFromIndex   (NTOSKRNL.EXE.@)
+ */
+NTSTATUS WINAPI KeGetProcessorNumberFromIndex(ULONG index, PPROCESSOR_NUMBER number)
+{
+    ULONG cpu_count = KeQueryActiveProcessorCountEx(ALL_PROCESSOR_GROUPS);
+
+    TRACE("index %lu, number %p (cpu_count %lu).\n", index, number, cpu_count);
+
+    if (!number) return STATUS_INVALID_PARAMETER;
+    if (index >= cpu_count) return STATUS_INVALID_PARAMETER;
+
+    number->Group = 0;
+    number->Number = (UCHAR)index;
+    number->Reserved = 0;
+    return STATUS_SUCCESS;
 }
 
 

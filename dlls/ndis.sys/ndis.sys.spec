@@ -216,6 +216,7 @@
 @ stub NdisMatchPdoWithPacket
 @ stub NdisOpenAdapter
 @ stub NdisOpenConfiguration
+@ stdcall NdisOpenConfigurationEx(ptr ptr)
 @ stub NdisOpenConfigurationKeyByIndex
 @ stub NdisOpenConfigurationKeyByName
 @ stub NdisOpenFile

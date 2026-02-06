@@ -3056,6 +3056,38 @@ static NTSTATUS map_pe_header( void *ptr, size_t size, int fd, BOOL *removable )
  */
 static void *get_host_addr_space_limit(void)
 {
+#ifdef __APPLE__
+    /*
+     * macOS has high address ranges that are not valid for mach_vm_map(), even though mmap() may
+     * silently ignore an out-of-range hint and pick a different address. We need the actual top
+     * of the valid address space, because later allocations use mach_vm_map() via anon_mmap_tryfixed().
+     *
+     * This is particularly important for Rosetta-translated x86_64 processes, where addresses
+     * near 0x7fffffff0000 can fail with KERN_INVALID_ADDRESS.
+     */
+    UINT_PTR limit = (UINT_PTR)MACH_VM_MAX_ADDRESS;
+
+    /* Keep the limit aligned to the Windows allocation granularity (64KB). */
+    limit &= ~granularity_mask;
+
+    while (limit > page_size)
+    {
+        mach_vm_address_t addr = (mach_vm_address_t)(limit - page_size);
+        kern_return_t ret = mach_vm_map( mach_task_self(), &addr, page_size, 0, VM_FLAGS_FIXED,
+                                         MEMORY_OBJECT_NULL, 0, 0, VM_PROT_NONE, VM_PROT_ALL, VM_INHERIT_COPY );
+
+        if (!ret)
+        {
+            mach_vm_deallocate( mach_task_self(), addr, page_size );
+            break;
+        }
+        if (ret == KERN_NO_SPACE) break; /* Valid but already mapped. */
+        limit -= granularity_mask + 1;
+        limit &= ~granularity_mask;
+    }
+
+    return (void *)limit;
+#else
     unsigned int flags = MAP_PRIVATE | MAP_ANON;
     UINT_PTR addr = (UINT_PTR)1 << 63;
 
@@ -3075,6 +3107,7 @@ static void *get_host_addr_space_limit(void)
         addr >>= 1;
     }
     return (void *)((addr << 1) - (granularity_mask + 1));
+#endif /* __APPLE__ */
 }
 
 #endif /* _WIN64 */

@@ -3307,11 +3307,72 @@ static void usr1_handler( int signal, siginfo_t *siginfo, void *sigcontext )
  * Handler for SIGSYS, signals that a non-existent system call was invoked.
  * Only called on macOS 14 Sonoma and later.
  */
+/* Shared struct written by rosettax87's Rosetta inline payload (arm64 side).
+ * This allows us to deliver a SIGSYS from outside the x86_64 CPU context
+ * (e.g. via kill(SIGSYS)) and still reconstruct the intended syscall site.
+ *
+ * Location: user_shared_data (0x7ffe0000) + page_size + 0x100 == 0x7ffe1100.
+ * The page at user_shared_data + page_size is already mapped by Wine. */
+#define ASTROWINE_SHM_MAGIC   0x0031545357525453ull /* "STRWST1\\0" little endian */
+#define ASTROWINE_SHM_VERSION 1u
+
+struct astrowine_shm
+{
+    UINT64 magic;
+    UINT32 version;
+    volatile UINT32 pending;
+    UINT64 syscall_nr;
+    UINT64 syscall_rip;
+    UINT64 rbx;
+    UINT64 rdx;
+    UINT64 rsi;
+    UINT64 rdi;
+    UINT64 rsp;
+    UINT64 rbp;
+    UINT64 r8;
+    UINT64 r9;
+    UINT64 r10;
+    UINT64 r12;
+    UINT64 r13;
+    UINT64 r14;
+    UINT64 r15;
+};
+
+static inline struct astrowine_shm *astrowine_get_shm(void)
+{
+    return (struct astrowine_shm *)((char *)user_shared_data + page_size + 0x100);
+}
+
 static void sigsys_handler( int signal, siginfo_t *siginfo, void *sigcontext )
 {
     extern const void *__wine_syscall_dispatcher_prolog_end_ptr;
     ucontext_t *ucontext = init_handler( sigcontext );
     struct syscall_frame *frame = amd64_thread_data()->syscall_frame;
+    struct astrowine_shm *shm = astrowine_get_shm();
+
+    /* If a Rosetta-side hook raised SIGSYS, override the trap context from shared memory. */
+    if (shm && shm->magic == ASTROWINE_SHM_MAGIC && shm->version == ASTROWINE_SHM_VERSION && shm->pending)
+    {
+        const UINT64 nr = shm->syscall_nr;
+        const UINT64 rip = shm->syscall_rip;
+
+        shm->pending = 0;
+        RAX_sig(ucontext) = nr;
+        if (rip) RIP_sig(ucontext) = rip;
+        RBX_sig(ucontext) = shm->rbx;
+        RDX_sig(ucontext) = shm->rdx;
+        RSI_sig(ucontext) = shm->rsi;
+        RDI_sig(ucontext) = shm->rdi;
+        RSP_sig(ucontext) = shm->rsp;
+        RBP_sig(ucontext) = shm->rbp;
+        R8_sig(ucontext)  = shm->r8;
+        R9_sig(ucontext)  = shm->r9;
+        R10_sig(ucontext) = shm->r10;
+        R12_sig(ucontext) = shm->r12;
+        R13_sig(ucontext) = shm->r13;
+        R14_sig(ucontext) = shm->r14;
+        R15_sig(ucontext) = shm->r15;
+    }
 
     TRACE_(seh)("SIGSYS, rax %#llx, rip %#llx.\n", RAX_sig(ucontext), RIP_sig(ucontext));
 
@@ -3555,6 +3616,29 @@ void signal_init_process(void)
     ptr = (char *)user_shared_data + page_size;
     anon_mmap_fixed( ptr, page_size, PROT_READ | PROT_WRITE, 0 );
     *(void **)ptr = __wine_syscall_dispatcher;
+#ifdef __APPLE__
+    {
+        struct astrowine_shm *shm = (struct astrowine_shm *)((char *)ptr + 0x100);
+        shm->magic = ASTROWINE_SHM_MAGIC;
+        shm->version = ASTROWINE_SHM_VERSION;
+        shm->pending = 0;
+        shm->syscall_nr = 0;
+        shm->syscall_rip = 0;
+        shm->rbx = 0;
+        shm->rdx = 0;
+        shm->rsi = 0;
+        shm->rdi = 0;
+        shm->rsp = 0;
+        shm->rbp = 0;
+        shm->r8 = 0;
+        shm->r9 = 0;
+        shm->r10 = 0;
+        shm->r12 = 0;
+        shm->r13 = 0;
+        shm->r14 = 0;
+        shm->r15 = 0;
+    }
+#endif
 
     if (cpu_info.ProcessorFeatureBits & CPU_FEATURE_XSAVE) syscall_flags |= SYSCALL_HAVE_XSAVE;
     if (xstate_compaction_enabled) syscall_flags |= SYSCALL_HAVE_XSAVEC;

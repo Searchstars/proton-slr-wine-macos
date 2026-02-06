@@ -208,6 +208,13 @@ void WINAPI NdisAllocateSpinLock(NDIS_SPIN_LOCK *lock)
     FIXME("(%p): stub\n", lock);
 }
 
+NDIS_STATUS WINAPI NdisOpenConfigurationEx(void *config, void **handle)
+{
+    TRACE("config %p, handle %p.\n", config, handle);
+    if (handle) *handle = config ? config : (void *)0x1;
+    return STATUS_SUCCESS;
+}
+
 void WINAPI NdisRegisterProtocol(NDIS_STATUS *status, NDIS_HANDLE *handle,
                                  NDIS_PROTOCOL_CHARACTERISTICS *prot, UINT len)
 {

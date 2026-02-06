@@ -2,6 +2,7 @@
 @ stdcall EtwUnregister(int64)
 @ stdcall -arch=!i386 ExAcquireFastMutex(ptr)
 @ stdcall -fastcall ExAcquireFastMutexUnsafe(ptr)
+@ stdcall ExAcquirePushLockSharedEx(ptr long)
 @ stub ExAcquireRundownProtection
 @ stub ExAcquireRundownProtectionEx
 @ stub ExInitializeRundownProtection
@@ -13,6 +14,7 @@
 @ stub ExReInitializeRundownProtection
 @ stdcall -arch=!i386 ExReleaseFastMutex(ptr)
 @ stdcall -fastcall ExReleaseFastMutexUnsafe(ptr)
+@ stdcall ExReleasePushLockSharedEx(ptr long)
 @ stdcall -fastcall ExReleaseResourceLite(ptr)
 @ stub ExReleaseRundownProtection
 @ stub ExReleaseRundownProtectionEx
@@ -35,6 +37,7 @@
 @ stdcall -arch=win64 ExpInterlockedPopEntrySList(ptr) RtlInterlockedPopEntrySList
 @ stdcall -arch=win64 ExpInterlockedPushEntrySList(ptr ptr) RtlInterlockedPushEntrySList
 @ stub HalExamineMBR
+@ stdcall HalGetEnvironmentVariableEx(long ptr ptr ptr ptr ptr)
 @ stdcall -arch=!i386 InitializeSListHead(ptr) RtlInitializeSListHead
 @ stdcall -fastcall InterlockedCompareExchange(ptr long long) NTOSKRNL_InterlockedCompareExchange
 @ stdcall -fastcall InterlockedDecrement(ptr) NTOSKRNL_InterlockedDecrement
@@ -54,6 +57,7 @@
 @ stdcall -fastcall KeAcquireInStackQueuedSpinLockAtDpcLevel(ptr ptr)
 @ stdcall KeAcquireGuardedMutexUnsafe(ptr)
 @ stdcall KeAcquireGuardedMutex(ptr)
+@ stdcall KeTryToAcquireGuardedMutex(ptr)
 @ stdcall KeEnterGuardedRegion()
 @ stdcall KeExpandKernelStackAndCallout(ptr ptr long)
 @ stdcall KeExpandKernelStackAndCalloutEx(ptr ptr long long ptr)
@@ -66,12 +70,17 @@
 @ stub KefAcquireSpinLockAtDpcLevel
 @ stub KefReleaseSpinLockFromDpcLevel
 @ stdcall KeGenericCallDpc(ptr ptr)
+@ stdcall KeIpiGenericCall(ptr int64)
+@ stdcall KeSetSystemGroupAffinityThread(ptr ptr)
+@ stdcall KeRevertToUserGroupAffinityThread(ptr)
+@ stdcall KeGetProcessorNumberFromIndex(long ptr)
 @ stdcall KeSignalCallDpcDone(ptr)
 @ stdcall KeSignalCallDpcSynchronize(ptr)
 @ stub KiAcquireSpinLock
 @ stub KiReleaseSpinLock
 @ stdcall -fastcall ObfDereferenceObject(ptr)
 @ stdcall -fastcall ObfReferenceObject(ptr)
+@ stdcall ObDereferenceObjectDeferDelete(ptr)
 @ stub RtlPrefetchMemoryNonTemporal
 @ stdcall -fastcall -arch=i386 -norelay RtlUlongByteSwap(long)
 @ stdcall -fastcall -arch=i386 -norelay RtlUlonglongByteSwap(int64)
@@ -89,6 +98,7 @@
 @ stub CcFastReadNotPossible
 @ stub CcFastReadWait
 @ stub CcFlushCache
+@ stdcall CcCoherencyFlushAndPurgeCache(ptr ptr long ptr long)
 @ stub CcGetDirtyPages
 @ stub CcGetFileObjectFromBcb
 @ stub CcGetFileObjectFromSectionPtrs
@@ -131,6 +141,7 @@
 @ varargs DbgPrintEx(long long str)
 @ stub DbgPrintReturnControlC
 @ stub DbgPrompt
+@ stdcall DbgCommandString(ptr long)
 @ stdcall DbgQueryDebugFilterState(long long)
 @ stub DbgSetDebugFilterState
 @ stdcall ExAcquireResourceExclusiveLite(ptr long)
@@ -161,6 +172,7 @@
 @ stub ExGetCurrentProcessorCounts
 @ stub ExGetCurrentProcessorCpuUsage
 @ stdcall ExGetExclusiveWaiterCount(ptr)
+@ stdcall ExGetFirmwareEnvironmentVariable(ptr ptr ptr ptr ptr)
 @ stdcall ExGetPreviousMode()
 @ stdcall ExGetSharedWaiterCount(ptr)
 @ stdcall ExInitializeNPagedLookasideList(ptr ptr ptr long long long long)
@@ -184,6 +196,7 @@
 @ stdcall ExLocalTimeToSystemTime(ptr ptr) RtlLocalTimeToSystemTime
 @ stdcall ExNotifyCallback(ptr ptr ptr)
 @ stub ExQueryPoolBlockSize
+@ stdcall ExQueryTimerResolution(ptr ptr ptr)
 @ stub ExQueueWorkItem
 @ stub ExRaiseAccessViolation
 @ stub ExRaiseDatatypeMisalignment
@@ -441,6 +454,7 @@
 @ stub IoPageRead
 @ stub IoPnPDeliverServicePowerNotification
 @ stdcall IoQueryDeviceDescription(ptr ptr ptr ptr ptr ptr ptr ptr)
+@ stdcall IoQueryFullDriverPath(ptr ptr)
 @ stub IoQueryFileDosDeviceName
 @ stub IoQueryFileInformation
 @ stub IoQueryVolumeInformation
@@ -612,11 +626,14 @@
 @ stdcall KeQueryActiveGroupCount() GetActiveProcessorGroupCount
 @ stdcall KeQueryGroupAffinity(long)
 @ stdcall KeQueryInterruptTime()
+@ stdcall KeQueryPerformanceCounter(ptr)
+@ stdcall KeQueryPrcbAddress(long)
 @ stdcall KeQueryPriorityThread(ptr)
 @ stub KeQueryRuntimeThread
 @ stdcall KeQuerySystemTime(ptr)
 @ stdcall KeQueryTickCount(ptr)
 @ stdcall KeQueryTimeIncrement()
+@ stdcall KeQueryUnbiasedInterruptTime()
 @ stdcall KeQueryMaximumGroupCount() GetMaximumProcessorGroupCount
 @ stdcall KeQueryMaximumProcessorCountEx(long)
 @ stdcall KeQueryMaximumProcessorCount()
@@ -640,6 +657,7 @@
 @ stdcall KeRemoveDeviceQueue(ptr)
 @ stub KeRemoveEntryDeviceQueue
 @ stub KeRemoveQueue
+@ stdcall KeRemoveQueueApc(ptr)
 @ stub KeRemoveQueueDpc
 @ stub KeRemoveSystemServiceTable
 @ stdcall KeResetEvent(ptr)
@@ -713,6 +731,7 @@
 @ stdcall MmBuildMdlForNonPagedPool(ptr)
 @ stub MmCanFileBeTruncated
 @ stub MmCommitSessionMappedView
+@ stdcall MmCopyMemory(ptr ptr long long ptr)
 @ stdcall MmCopyVirtualMemory(ptr ptr ptr ptr long long ptr)
 @ stub MmCreateMdl
 @ stdcall MmCreateSection(ptr long ptr ptr long long long ptr)
@@ -740,6 +759,7 @@
 @ stub MmLockPagableImageSection
 @ stdcall MmLockPagableSectionByHandle(ptr)
 @ stdcall MmMapIoSpace(int64 long long)
+@ stdcall MmMapIoSpaceEx(int64 long long)
 @ stub MmMapLockedPages
 @ stdcall MmMapLockedPagesSpecifyCache(ptr long long ptr long long)
 @ stub MmMapLockedPagesWithReservedMapping
@@ -761,7 +781,8 @@
 @ stub MmRemovePhysicalMemory
 @ stdcall MmResetDriverPaging(ptr)
 @ stub MmSectionObjectType
-@ stub MmSecureVirtualMemory
+@ stdcall MmSecureVirtualMemory(ptr long long)
+@ stdcall MmSecureVirtualMemoryEx(ptr long long long)
 @ stub MmSetAddressRangeModified
 @ stub MmSetBankedSection
 @ stub MmSizeOfMdl
@@ -912,9 +933,12 @@
 @ stdcall PsGetCurrentProcessSessionId()
 @ stdcall PsGetCurrentThread() KeGetCurrentThread
 @ stdcall PsGetCurrentThreadId()
+@ stdcall PsGetCurrentThreadProcess()
+@ stdcall PsGetCurrentThreadProcessId()
 @ stub PsGetCurrentThreadPreviousMode
 @ stub PsGetCurrentThreadStackBase
 @ stub PsGetCurrentThreadStackLimit
+@ stdcall PsGetCurrentThreadTeb()
 @ stub PsGetJobLock
 @ stub PsGetJobSessionId
 @ stub PsGetJobUIRestrictionsClass
@@ -1363,13 +1387,14 @@
 @ stub SePrivilegeObjectAuditAlarm
 @ stub SePublicDefaultDacl
 @ stub SeQueryAuthenticationIdToken
-@ stub SeQueryInformationToken
+@ stdcall SeQueryInformationToken(ptr long ptr)
 @ stub SeQuerySecurityDescriptorInfo
 @ stub SeQuerySessionIdToken
 @ stub SeRegisterLogonSessionTerminatedRoutine
 @ stub SeReleaseSecurityDescriptor
 @ stub SeReleaseSubjectContext
 @ stub SeSetAccessStateGenericMapping
+@ stdcall SeSetAuditParameter(ptr long ptr)
 @ stub SeSetSecurityDescriptorInfo
 @ stub SeSetSecurityDescriptorInfoEx
 @ stdcall SeSinglePrivilegeCheck(int64 long)
@@ -1384,6 +1409,7 @@
 @ stub SeUnregisterLogonSessionTerminatedRoutine
 @ stub SeValidSecurityDescriptor
 @ stdcall -ret64 VerSetConditionMask(int64 long long)
+@ stdcall VslGetSecurePciEnabled()
 @ stub VfFailDeviceNode
 @ stub VfFailDriver
 @ stub VfFailSystemBIOS

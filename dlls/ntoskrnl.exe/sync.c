@@ -463,6 +463,25 @@ void WINAPI KeAcquireGuardedMutex(PKGUARDED_MUTEX mutex)
 }
 
 /***********************************************************************
+ *           KeTryToAcquireGuardedMutex   (NTOSKRNL.EXE.@)
+ */
+BOOLEAN WINAPI KeTryToAcquireGuardedMutex(PKGUARDED_MUTEX mutex)
+{
+    LONG count;
+
+    TRACE("mutex %p.\n", mutex);
+
+    count = mutex->Count;
+    while (count > 0)
+    {
+        LONG prev = InterlockedCompareExchange( &mutex->Count, count - 1, count );
+        if (prev == count) return TRUE;
+        count = prev;
+    }
+    return FALSE;
+}
+
+/***********************************************************************
  *           KeReleaseGuardedMutexUnsafe   (NTOSKRNL.EXE.@)
  */
 void WINAPI KeReleaseGuardedMutexUnsafe(PKGUARDED_MUTEX mutex)
