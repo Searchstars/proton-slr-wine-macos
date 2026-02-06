@@ -166,18 +166,6 @@ const char **dll_paths = NULL;
 const char **system_dll_paths = NULL;
 const char *user_name = NULL;
 SECTION_IMAGE_INFORMATION main_image_info = { NULL };
-struct rosetta_wine_control rosetta_wine_control __attribute__((used)) =
-{
-    ROSETTA_WINE_CONTROL_MAGIC0,
-    ROSETTA_WINE_CONTROL_MAGIC1,
-    ROSETTA_WINE_CONTROL_VERSION,
-    sizeof(struct rosetta_wine_control),
-    0,
-    0,
-    0,
-    0,
-    0
-};
 
 /* adjust an array of pointers to make them into RVAs */
 static inline void fixup_rva_ptrs( void *array, BYTE *base, unsigned int count )
@@ -226,12 +214,6 @@ static void fatal_error( const char *err, ... )
     vfprintf( stderr, err, args );
     va_end( args );
     exit(1);
-}
-
-static inline void update_rosetta_wine_control( void *module, SIZE_T size )
-{
-    rosetta_wine_control.main_image_base = (uint64_t)(ULONG_PTR)module;
-    rosetta_wine_control.main_image_size = (uint64_t)size;
 }
 
 static void set_max_limit( int limit )
@@ -1893,11 +1875,7 @@ NTSTATUS load_main_exe( const WCHAR *dos_name, const char *unix_name, const WCHA
         init_unicode_string( &nt_name, *image );
         loadorder = get_load_order( &nt_name );
         status = open_main_image( *image, module, &main_image_info, loadorder, load_machine );
-        if (status != STATUS_DLL_NOT_FOUND)
-        {
-            if (!status) update_rosetta_wine_control( *module, main_image_info.ImageFileSize );
-            return status;
-        }
+        if (status != STATUS_DLL_NOT_FOUND) return status;
         free( *image );
     }
 
@@ -1917,22 +1895,14 @@ NTSTATUS load_main_exe( const WCHAR *dos_name, const char *unix_name, const WCHA
     if (loadorder == LO_INVALID) loadorder = get_load_order( &nt_name );
 
     status = open_main_image( *image, module, &main_image_info, loadorder, load_machine );
-    if (status != STATUS_DLL_NOT_FOUND)
-    {
-        if (!status) update_rosetta_wine_control( *module, main_image_info.ImageFileSize );
-        return status;
-    }
+    if (status != STATUS_DLL_NOT_FOUND) return status;
 
     /* if path is in system dir, we can load the builtin even if the file itself doesn't exist */
     if (loadorder != LO_NATIVE && is_builtin_path( &nt_name, &search_machine ))
     {
         status = find_builtin_dll( &nt_name, module, &size, &main_image_info, 0, 0,
                                    search_machine, load_machine, FALSE, 0 );
-        if (status != STATUS_DLL_NOT_FOUND)
-        {
-            if (!status) update_rosetta_wine_control( *module, main_image_info.ImageFileSize );
-            return status;
-        }
+        if (status != STATUS_DLL_NOT_FOUND) return status;
     }
     if (!contains_path) return STATUS_DLL_NOT_FOUND;
 
