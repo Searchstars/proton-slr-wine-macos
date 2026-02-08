@@ -997,6 +997,171 @@ done:
 BOOL terminate_process_running;
 LONG terminate_process_exit_code;
 
+#ifdef __x86_64__
+struct terminate_trace_syscall_frame
+{
+    ULONG64 rax, rbx, rcx, rdx;
+    ULONG64 rsi, rdi, r8, r9;
+    ULONG64 r10, r11, r12, r13;
+    ULONG64 r14, r15;
+    ULONG64 rip;
+    ULONG64 cs;
+    ULONG64 eflags;
+    ULONG64 rsp;
+    ULONG64 ss;
+    ULONG64 rbp;
+};
+
+struct terminate_trace_amd64_thread_data
+{
+    DWORD_PTR dr0, dr1, dr2, dr3, dr6, dr7;
+    void *pthread_teb;
+    struct terminate_trace_syscall_frame *syscall_frame;
+};
+
+static void *get_terminate_syscall_caller( ULONG64 *rsp, ULONG64 *rbp, ULONG64 *rax, ULONG64 *rcx )
+{
+    struct terminate_trace_amd64_thread_data *cpu_data =
+        (struct terminate_trace_amd64_thread_data *)ntdll_get_thread_data()->cpu_data;
+
+    if (!cpu_data || !cpu_data->syscall_frame) return NULL;
+    if (rsp) *rsp = cpu_data->syscall_frame->rsp;
+    if (rbp) *rbp = cpu_data->syscall_frame->rbp;
+    if (rax) *rax = cpu_data->syscall_frame->rax;
+    if (rcx) *rcx = cpu_data->syscall_frame->rcx;
+    return (void *)(ULONG_PTR)cpu_data->syscall_frame->rip;
+}
+#else
+static void *get_terminate_syscall_caller( ULONG64 *rsp, ULONG64 *rbp, ULONG64 *rax, ULONG64 *rcx )
+{
+    if (rsp) *rsp = 0;
+    if (rbp) *rbp = 0;
+    if (rax) *rax = 0;
+    if (rcx) *rcx = 0;
+    return NULL;
+}
+#endif
+
+static void trace_terminate_syscall_site( void *pc, ULONG64 rsp )
+{
+    MEMORY_BASIC_INFORMATION mbi;
+    struct
+    {
+        MEMORY_SECTION_NAME section;
+        WCHAR buffer[512];
+    } section_name;
+    ULONG64 stack_qwords[8];
+    unsigned char code_bytes[32];
+    SIZE_T ret_len = 0;
+    NTSTATUS status;
+    unsigned int i;
+
+    if (!pc) return;
+
+    TRACE( "NtTerminateProcess syscall site pc %p.\n", pc );
+
+    status = NtQueryVirtualMemory( NtCurrentProcess(), pc, MemoryBasicInformation,
+                                   &mbi, sizeof(mbi), &ret_len );
+    if (!status)
+    {
+        TRACE( "NtTerminateProcess syscall site vmem base %p alloc_base %p region %p state %#x protect %#x type %#x.\n",
+               mbi.BaseAddress, mbi.AllocationBase, (void *)mbi.RegionSize,
+               mbi.State, mbi.Protect, mbi.Type );
+    }
+    else
+    {
+        TRACE( "NtTerminateProcess syscall site vmem query failed %#x for pc %p.\n", status, pc );
+    }
+
+    memset( &section_name, 0, sizeof(section_name) );
+    status = NtQueryVirtualMemory( NtCurrentProcess(), pc, MemoryMappedFilenameInformation,
+                                   &section_name, sizeof(section_name), &ret_len );
+    if (!status && section_name.section.SectionFileName.Buffer)
+        TRACE( "NtTerminateProcess syscall site mapped file %s.\n",
+               debugstr_us( &section_name.section.SectionFileName ) );
+    else
+        TRACE( "NtTerminateProcess syscall site mapped file query failed %#x for pc %p.\n", status, pc );
+
+    if (rsp)
+    {
+        memset( stack_qwords, 0, sizeof(stack_qwords) );
+        status = NtReadVirtualMemory( NtCurrentProcess(), (void *)(ULONG_PTR)rsp,
+                                      stack_qwords, sizeof(stack_qwords), &ret_len );
+        if (!status)
+        {
+            TRACE( "NtTerminateProcess syscall stack rsp=%#llx captured %u qwords.\n",
+                   (unsigned long long)rsp, (unsigned int)(ret_len / sizeof(ULONG64)) );
+            for (i = 0; i < ret_len / sizeof(ULONG64); ++i)
+            {
+                MEMORY_BASIC_INFORMATION addr_mbi;
+                struct
+                {
+                    MEMORY_SECTION_NAME section;
+                    WCHAR buffer[260];
+                } addr_section;
+                NTSTATUS addr_status;
+
+                TRACE( "NtTerminateProcess syscall stack[%u] %#llx (%s).\n", i,
+                       (unsigned long long)stack_qwords[i],
+                       wine_debuginfostr_pc( (void *)(ULONG_PTR)stack_qwords[i] ) );
+
+                addr_status = NtQueryVirtualMemory( NtCurrentProcess(), (void *)(ULONG_PTR)stack_qwords[i],
+                                                    MemoryBasicInformation, &addr_mbi, sizeof(addr_mbi), NULL );
+                if (!addr_status)
+                {
+                    TRACE( "NtTerminateProcess syscall stack[%u] vmem base %p alloc_base %p region %p state %#x protect %#x type %#x.\n",
+                           i, addr_mbi.BaseAddress, addr_mbi.AllocationBase, (void *)addr_mbi.RegionSize,
+                           addr_mbi.State, addr_mbi.Protect, addr_mbi.Type );
+                }
+                else
+                {
+                    TRACE( "NtTerminateProcess syscall stack[%u] vmem query failed %#x.\n", i, addr_status );
+                }
+
+                memset( &addr_section, 0, sizeof(addr_section) );
+                addr_status = NtQueryVirtualMemory( NtCurrentProcess(), (void *)(ULONG_PTR)stack_qwords[i],
+                                                    MemoryMappedFilenameInformation,
+                                                    &addr_section, sizeof(addr_section), NULL );
+                if (!addr_status && addr_section.section.SectionFileName.Buffer)
+                {
+                    TRACE( "NtTerminateProcess syscall stack[%u] mapped file %s.\n", i,
+                           debugstr_us( &addr_section.section.SectionFileName ) );
+                }
+            }
+        }
+        else
+        {
+            TRACE( "NtTerminateProcess syscall stack read failed %#x at rsp %#llx.\n",
+                   status, (unsigned long long)rsp );
+        }
+    }
+
+    memset( code_bytes, 0, sizeof(code_bytes) );
+    status = NtReadVirtualMemory( NtCurrentProcess(), (char *)pc - 16,
+                                  code_bytes, sizeof(code_bytes), &ret_len );
+    if (!status)
+    {
+        TRACE( "NtTerminateProcess syscall code around %p (%u bytes): "
+               "%02x %02x %02x %02x %02x %02x %02x %02x "
+               "%02x %02x %02x %02x %02x %02x %02x %02x "
+               "%02x %02x %02x %02x %02x %02x %02x %02x "
+               "%02x %02x %02x %02x %02x %02x %02x %02x.\n",
+               pc, (unsigned int)ret_len,
+               code_bytes[0], code_bytes[1], code_bytes[2], code_bytes[3],
+               code_bytes[4], code_bytes[5], code_bytes[6], code_bytes[7],
+               code_bytes[8], code_bytes[9], code_bytes[10], code_bytes[11],
+               code_bytes[12], code_bytes[13], code_bytes[14], code_bytes[15],
+               code_bytes[16], code_bytes[17], code_bytes[18], code_bytes[19],
+               code_bytes[20], code_bytes[21], code_bytes[22], code_bytes[23],
+               code_bytes[24], code_bytes[25], code_bytes[26], code_bytes[27],
+               code_bytes[28], code_bytes[29], code_bytes[30], code_bytes[31] );
+    }
+    else
+    {
+        TRACE( "NtTerminateProcess syscall code read failed %#x around pc %p.\n", status, pc );
+    }
+}
+
 /******************************************************************************
  *              NtTerminateProcess  (NTDLL.@)
  */
@@ -1004,8 +1169,49 @@ NTSTATUS WINAPI NtTerminateProcess( HANDLE handle, LONG exit_code )
 {
     unsigned int ret;
     BOOL self;
+    static int trace_terminate_enabled = -1;
+    static int ignore_deadc0de_enabled = -1;
+    void *caller = NULL;
+    const char *caller_str = NULL;
+    ULONG64 syscall_rsp = 0, syscall_rbp = 0, syscall_rax = 0, syscall_rcx = 0;
+    void *syscall_caller = NULL;
+    const char *syscall_caller_str = "<none>";
 
-    TRACE("handle %p, exit_code %d, process_exiting %d.\n", handle, (int)exit_code, process_exiting);
+    if (trace_terminate_enabled == -1)
+    {
+        const char *env = getenv( "ASTROWINE_TRACE_TERMINATE" );
+        trace_terminate_enabled = (env && env[0] && strcmp(env, "0")) ? 1 : 0;
+    }
+    if (ignore_deadc0de_enabled == -1)
+    {
+        const char *env = getenv( "ASTROWINE_IGNORE_DEADC0DE" );
+        ignore_deadc0de_enabled = (env && env[0] && strcmp(env, "0")) ? 1 : 0;
+    }
+
+    if (trace_terminate_enabled)
+    {
+        caller = __builtin_extract_return_addr( __builtin_return_address(0) );
+        caller_str = wine_debuginfostr_pc( caller );
+        syscall_caller = get_terminate_syscall_caller( &syscall_rsp, &syscall_rbp, &syscall_rax, &syscall_rcx );
+        syscall_caller_str = syscall_caller ? wine_debuginfostr_pc( syscall_caller ) : "<none>";
+
+        TRACE("handle %p, exit_code %d, process_exiting %d, caller %p (%s), syscall caller %p (%s), frame rip=%p rsp=%#llx rbp=%#llx rax=%#llx rcx=%#llx.\n",
+              handle, (int)exit_code, process_exiting, caller, caller_str, syscall_caller, syscall_caller_str, syscall_caller,
+              (unsigned long long)syscall_rsp, (unsigned long long)syscall_rbp,
+              (unsigned long long)syscall_rax, (unsigned long long)syscall_rcx );
+        if ((ULONG)exit_code == 0xdeadc0deu) trace_terminate_syscall_site( syscall_caller, syscall_rsp );
+    }
+    else
+    {
+        TRACE("handle %p, exit_code %d, process_exiting %d.\n", handle, (int)exit_code, process_exiting);
+    }
+
+    if (ignore_deadc0de_enabled && (ULONG)exit_code == 0xdeadc0deu &&
+        (handle == GetCurrentProcess() || !handle || handle == (HANDLE)-1))
+    {
+        WARN( "Ignoring self NtTerminateProcess(0xDEADC0DE) due to ASTROWINE_IGNORE_DEADC0DE.\n" );
+        return STATUS_SUCCESS;
+    }
 
     if (handle == GetCurrentProcess())
     {
@@ -1022,7 +1228,17 @@ NTSTATUS WINAPI NtTerminateProcess( HANDLE handle, LONG exit_code )
     }
     SERVER_END_REQ;
 
-    TRACE("handle %p, self %d, process_exiting %d.\n", handle, self, process_exiting);
+    if (trace_terminate_enabled)
+    {
+        TRACE("handle %p, self %d, process_exiting %d, caller %p (%s), syscall caller %p (%s), frame rip=%p rsp=%#llx rbp=%#llx rax=%#llx rcx=%#llx.\n",
+              handle, self, process_exiting, caller, caller_str, syscall_caller, syscall_caller_str, syscall_caller,
+              (unsigned long long)syscall_rsp, (unsigned long long)syscall_rbp,
+              (unsigned long long)syscall_rax, (unsigned long long)syscall_rcx );
+    }
+    else
+    {
+        TRACE("handle %p, self %d, process_exiting %d.\n", handle, self, process_exiting);
+    }
     if (self)
     {
         if (!handle) process_exiting = TRUE;

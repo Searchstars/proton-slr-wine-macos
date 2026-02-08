@@ -247,6 +247,89 @@ static const struct wined3d_extension_map wgl_extension_map[] =
     {"WGL_WINE_query_renderer",             WGL_WINE_QUERY_RENDERER          },
 };
 
+static void wined3d_caps_gl_release_dc(HWND wnd, HDC dc)
+{
+    if (!dc)
+        return;
+
+    if (wnd)
+    {
+        wined3d_release_dc(wnd, dc);
+    }
+    else if (!DeleteDC(dc))
+    {
+        WARN("DeleteDC(%p) failed, last error %#lx.\n", dc, GetLastError());
+    }
+}
+
+static BOOL wined3d_caps_gl_ctx_set_pixel_format(struct wined3d_caps_gl_ctx *ctx,
+        PIXELFORMATDESCRIPTOR *pfd, const char *name)
+{
+    unsigned int dc_type = GetObjectType(ctx->dc);
+    int pixel_format_count;
+    int pixel_format;
+    unsigned int i;
+    static const int fallback_formats[] = {13, 17, 1, 2, 3, 4, 5, 9, 25, 33};
+
+    pixel_format_count = DescribePixelFormat(ctx->dc, 1, sizeof(*pfd), NULL);
+    TRACE("%s: DC %p type %#x, pixel formats %d.\n", name, ctx->dc, dc_type, pixel_format_count);
+
+    SetLastError(ERROR_SUCCESS);
+    if (!(pixel_format = ChoosePixelFormat(ctx->dc, pfd)))
+    {
+        WARN("%s: ChoosePixelFormat() failed, last error %#lx.\n", name, GetLastError());
+        /* Some anti-cheat layers interfere with Describe/ChoosePixelFormat.
+         * Fall back to probing commonly valid format IDs directly. */
+        for (i = 0; i < ARRAY_SIZE(fallback_formats); ++i)
+        {
+            PIXELFORMATDESCRIPTOR fmt = *pfd;
+            pixel_format = fallback_formats[i];
+
+            if (pixel_format_count > 0
+                    && !DescribePixelFormat(ctx->dc, pixel_format, sizeof(fmt), &fmt))
+                continue;
+
+            SetLastError(ERROR_SUCCESS);
+            if (!SetPixelFormat(ctx->dc, pixel_format, &fmt))
+                continue;
+
+            *pfd = fmt;
+            TRACE("%s: using fallback pixel format %d.\n", name, pixel_format);
+            return TRUE;
+        }
+
+        for (pixel_format = 1; pixel_format <= 64; ++pixel_format)
+        {
+            PIXELFORMATDESCRIPTOR fmt = *pfd;
+
+            if (pixel_format_count > 0
+                    && !DescribePixelFormat(ctx->dc, pixel_format, sizeof(fmt), &fmt))
+                continue;
+
+            SetLastError(ERROR_SUCCESS);
+            if (!SetPixelFormat(ctx->dc, pixel_format, &fmt))
+                continue;
+
+            *pfd = fmt;
+            TRACE("%s: using brute-force pixel format %d.\n", name, pixel_format);
+            return TRUE;
+        }
+
+        return FALSE;
+    }
+
+    DescribePixelFormat(ctx->dc, pixel_format, sizeof(*pfd), pfd);
+    SetLastError(ERROR_SUCCESS);
+    if (!SetPixelFormat(ctx->dc, pixel_format, pfd))
+    {
+        WARN("%s: SetPixelFormat(%d) failed, last error %#lx.\n", name, pixel_format, GetLastError());
+        return FALSE;
+    }
+
+    TRACE("%s: using pixel format %d.\n", name, pixel_format);
+    return TRUE;
+}
+
 static void wined3d_caps_gl_ctx_destroy(const struct wined3d_caps_gl_ctx *ctx)
 {
     const struct wined3d_gl_info *gl_info = ctx->gl_info;
@@ -271,7 +354,7 @@ static void wined3d_caps_gl_ctx_destroy(const struct wined3d_caps_gl_ctx *ctx)
         ERR("wglDeleteContext(%p) failed, last error %#x.\n", ctx->gl_ctx, err);
     }
 
-    wined3d_release_dc(ctx->wnd, ctx->dc);
+    wined3d_caps_gl_release_dc(ctx->wnd, ctx->dc);
     if (ctx->window_owned)
         DestroyWindow(ctx->wnd);
 
@@ -309,10 +392,51 @@ static BOOL wined3d_caps_gl_ctx_create_attribs(struct wined3d_caps_gl_ctx *caps_
     return TRUE;
 }
 
+static HWND wined3d_find_process_window(void)
+{
+    const DWORD pid = GetCurrentProcessId();
+    HWND hwnd = GetTopWindow(NULL);
+    HWND fallback = NULL;
+
+    while (hwnd)
+    {
+        char class_name[64] = "";
+        DWORD window_pid = 0;
+
+        if (hwnd != GetDesktopWindow() && hwnd != GetShellWindow()
+                && IsWindow(hwnd) && GetWindowThreadProcessId(hwnd, &window_pid) && window_pid == pid)
+        {
+            HDC dc;
+            int pixel_formats = 0;
+
+            if (!fallback)
+                fallback = hwnd;
+
+            if (!GetClassNameA(hwnd, class_name, ARRAY_SIZE(class_name)))
+                strcpy(class_name, "<unknown>");
+
+            if ((dc = GetDC(hwnd)))
+            {
+                pixel_formats = DescribePixelFormat(dc, 1, 0, NULL);
+                ReleaseDC(hwnd, dc);
+            }
+            TRACE("Process window candidate %p class %s has %d pixel formats.\n", hwnd, class_name, pixel_formats);
+            if (pixel_formats > 0)
+                return hwnd;
+        }
+
+        hwnd = GetWindow(hwnd, GW_HWNDNEXT);
+    }
+
+    if (fallback)
+        WARN("No process window with GL pixel formats found, using fallback %p.\n", fallback);
+
+    return fallback;
+}
+
 static BOOL wined3d_caps_gl_ctx_create(struct wined3d_adapter_gl *adapter_gl, struct wined3d_caps_gl_ctx *ctx)
 {
     PIXELFORMATDESCRIPTOR pfd;
-    int iPixelFormat;
 
     TRACE("getting context...\n");
 
@@ -324,14 +448,57 @@ static BOOL wined3d_caps_gl_ctx_create(struct wined3d_adapter_gl *adapter_gl, st
 
     SetLastError(ERROR_SUCCESS);
     ctx->wnd = CreateWindowA(WINED3D_OPENGL_WINDOW_CLASS_NAME, WINED3D_OPENGL_WINDOW_TITLE,
-            WS_OVERLAPPEDWINDOW, 10, 10, 10, 10, NULL, NULL, NULL, NULL);
+            WS_POPUP | WS_CLIPSIBLINGS | WS_CLIPCHILDREN, 0, 0, 16, 16, NULL, NULL, NULL, NULL);
+    if (ctx->wnd && !IsWindow(ctx->wnd))
+    {
+        WARN("Created helper window %p, but it became invalid immediately.\n", ctx->wnd);
+        ctx->wnd = NULL;
+    }
     if (!ctx->wnd)
     {
         WARN("CreateWindowA(\"%s\") failed, last error %#lx. Retrying as child window.\n",
                 WINED3D_OPENGL_WINDOW_CLASS_NAME, GetLastError());
         SetLastError(ERROR_SUCCESS);
         ctx->wnd = CreateWindowA(WINED3D_OPENGL_WINDOW_CLASS_NAME, WINED3D_OPENGL_WINDOW_TITLE,
-                WS_CHILD, 0, 0, 16, 16, GetDesktopWindow(), NULL, NULL, NULL);
+                WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN, 0, 0, 16, 16, GetDesktopWindow(), NULL, NULL, NULL);
+        if (ctx->wnd && !IsWindow(ctx->wnd))
+        {
+            WARN("Created child helper window %p, but it became invalid immediately.\n", ctx->wnd);
+            ctx->wnd = NULL;
+        }
+    }
+    if (!ctx->wnd)
+    {
+        /* Some anti-cheat layers target unknown helper classes aggressively.
+         * Try a built-in class to obtain a GL-capable DC for capability probing. */
+        if (!GetModuleHandleA("uxtheme.dll"))
+            LoadLibraryA("uxtheme.dll");
+        WARN("Retrying helper creation using built-in \"Static\" class.\n");
+        SetLastError(ERROR_SUCCESS);
+        ctx->wnd = CreateWindowA("Static", "", WS_POPUP | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
+                0, 0, 16, 16, NULL, NULL, NULL, NULL);
+        if (ctx->wnd && !IsWindow(ctx->wnd))
+        {
+            WARN("Created built-in helper window %p, but it became invalid immediately.\n", ctx->wnd);
+            ctx->wnd = NULL;
+        }
+    }
+    if (!ctx->wnd)
+    {
+        SetLastError(ERROR_SUCCESS);
+        ctx->wnd = CreateWindowA("Static", "", WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
+                0, 0, 16, 16, GetDesktopWindow(), NULL, NULL, NULL);
+        if (ctx->wnd && !IsWindow(ctx->wnd))
+        {
+            WARN("Created built-in child helper window %p, but it became invalid immediately.\n", ctx->wnd);
+            ctx->wnd = NULL;
+        }
+    }
+    if (!ctx->wnd)
+    {
+        ctx->wnd = wined3d_find_process_window();
+        if (ctx->wnd)
+            WARN("Using existing process window %p for capability context.\n", ctx->wnd);
     }
     if (!ctx->wnd)
     {
@@ -364,14 +531,43 @@ static BOOL wined3d_caps_gl_ctx_create(struct wined3d_adapter_gl *adapter_gl, st
     pfd.cColorBits = 32;
     pfd.iLayerType = PFD_MAIN_PLANE;
 
-    if (!(iPixelFormat = ChoosePixelFormat(ctx->dc, &pfd)))
+    if (!wined3d_caps_gl_ctx_set_pixel_format(ctx, &pfd, "window-dc"))
     {
-        /* If this happens something is very wrong as ChoosePixelFormat barely fails. */
-        ERR("Failed to find a suitable pixel format.\n");
-        goto fail;
+        /* Some anti-cheat stacks race helper window creation / destruction.
+         * Try a display DC that does not depend on the helper window lifetime. */
+        WARN("Failed to select a pixel format on window DC, trying display DC fallback.\n");
+
+        wined3d_caps_gl_release_dc(ctx->wnd, ctx->dc);
+        ctx->dc = NULL;
+        if (ctx->window_owned && ctx->wnd)
+            DestroyWindow(ctx->wnd);
+        ctx->wnd = NULL;
+        ctx->window_owned = FALSE;
+
+        if (!(ctx->dc = CreateDCA("DISPLAY", NULL, NULL, NULL)))
+        {
+            ERR("Failed to create a display DC, last error %#lx.\n", GetLastError());
+            goto fail;
+        }
+
+        ZeroMemory(&pfd, sizeof(pfd));
+        pfd.nSize = sizeof(pfd);
+        pfd.nVersion = 1;
+        pfd.dwFlags = PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER | PFD_DRAW_TO_WINDOW;
+        pfd.iPixelType = PFD_TYPE_RGBA;
+        pfd.cColorBits = 32;
+        pfd.iLayerType = PFD_MAIN_PLANE;
+
+        if (!wined3d_caps_gl_ctx_set_pixel_format(ctx, &pfd, "display-dc-window"))
+        {
+            pfd.dwFlags = PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER | PFD_DRAW_TO_BITMAP;
+            if (!wined3d_caps_gl_ctx_set_pixel_format(ctx, &pfd, "display-dc-bitmap"))
+            {
+                ERR("Failed to find a suitable pixel format.\n");
+                goto fail;
+            }
+        }
     }
-    DescribePixelFormat(ctx->dc, iPixelFormat, sizeof(pfd), &pfd);
-    SetPixelFormat(ctx->dc, iPixelFormat, &pfd);
 
     /* Create a GL context. */
     if (!(ctx->gl_ctx = wglCreateContext(ctx->dc)))
@@ -393,7 +589,7 @@ static BOOL wined3d_caps_gl_ctx_create(struct wined3d_adapter_gl *adapter_gl, st
 fail:
     if (ctx->gl_ctx) wglDeleteContext(ctx->gl_ctx);
     ctx->gl_ctx = NULL;
-    if (ctx->dc) ReleaseDC(ctx->wnd, ctx->dc);
+    wined3d_caps_gl_release_dc(ctx->wnd, ctx->dc);
     ctx->dc = NULL;
     if (ctx->wnd && ctx->window_owned) DestroyWindow(ctx->wnd);
     ctx->wnd = NULL;

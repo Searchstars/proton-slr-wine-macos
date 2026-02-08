@@ -3321,8 +3321,19 @@ struct astrowine_shm
     UINT64 magic;
     UINT32 version;
     volatile UINT32 pending;
+    volatile UINT32 result_ready;
+    UINT32 _pad_result;
+    UINT32 _pad_result2;
     UINT64 syscall_nr;
     UINT64 syscall_rip;
+    UINT64 result_rax;
+    UINT64 sender_pthread_self;
+    UINT64 sender_pthread_teb;
+    UINT64 sender_thread_selfid;
+    UINT64 sender_pthread_kill_id;
+    UINT64 sender_unmask_result;
+    UINT64 sender_raise_stage;
+    UINT64 sender_raise_result;
     UINT64 rbx;
     UINT64 rdx;
     UINT64 rsi;
@@ -3338,9 +3349,384 @@ struct astrowine_shm
     UINT64 r15;
 };
 
+#define ASTROWINE_THREAD_SLOT_COUNT 1024u
+
+struct astrowine_thread_slot
+{
+    volatile UINT64 pthread_self;
+    volatile UINT64 pthread_teb;
+    volatile UINT64 stack_low;
+    volatile UINT64 stack_high;
+    volatile UINT64 thread_selfid;
+    volatile UINT64 pthread_kill_id;
+};
+
+static struct astrowine_thread_slot astrowine_thread_slots[ASTROWINE_THREAD_SLOT_COUNT];
+
+static void astrowine_register_thread_slot( TEB *teb )
+{
+    UINT64 self = (UINT64)(ULONG_PTR)pthread_self();
+    UINT64 teb_ptr = (UINT64)(ULONG_PTR)amd64_thread_data()->pthread_teb;
+    UINT64 stack_low = (UINT64)(ULONG_PTR)teb->Tib.StackLimit;
+    UINT64 stack_high = (UINT64)(ULONG_PTR)teb->Tib.StackBase;
+    UINT64 thread_selfid = 0;
+    UINT64 kill_id = *(const UINT32 *)((const char *)pthread_self() + 0xf8);
+    UINT32 i;
+
+#ifdef SYS_thread_selfid
+    thread_selfid = syscall( SYS_thread_selfid );
+#endif
+
+    if (!self) return;
+
+    for (i = 0; i < ASTROWINE_THREAD_SLOT_COUNT; ++i)
+    {
+        UINT64 cur = __atomic_load_n( &astrowine_thread_slots[i].pthread_self, __ATOMIC_ACQUIRE );
+        if (cur == self)
+        {
+            __atomic_store_n( &astrowine_thread_slots[i].pthread_teb, teb_ptr, __ATOMIC_RELEASE );
+            __atomic_store_n( &astrowine_thread_slots[i].stack_low, stack_low, __ATOMIC_RELEASE );
+            __atomic_store_n( &astrowine_thread_slots[i].stack_high, stack_high, __ATOMIC_RELEASE );
+            __atomic_store_n( &astrowine_thread_slots[i].thread_selfid, thread_selfid, __ATOMIC_RELEASE );
+            __atomic_store_n( &astrowine_thread_slots[i].pthread_kill_id, kill_id, __ATOMIC_RELEASE );
+            return;
+        }
+        if (!cur)
+        {
+            UINT64 expected = 0;
+            if (__atomic_compare_exchange_n( &astrowine_thread_slots[i].pthread_self, &expected, self, FALSE,
+                                             __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE ))
+            {
+                __atomic_store_n( &astrowine_thread_slots[i].pthread_teb, teb_ptr, __ATOMIC_RELEASE );
+                __atomic_store_n( &astrowine_thread_slots[i].stack_low, stack_low, __ATOMIC_RELEASE );
+                __atomic_store_n( &astrowine_thread_slots[i].stack_high, stack_high, __ATOMIC_RELEASE );
+                __atomic_store_n( &astrowine_thread_slots[i].thread_selfid, thread_selfid, __ATOMIC_RELEASE );
+                __atomic_store_n( &astrowine_thread_slots[i].pthread_kill_id, kill_id, __ATOMIC_RELEASE );
+                return;
+            }
+        }
+    }
+}
+
+static void astrowine_unregister_thread_slot( TEB *teb )
+{
+    UINT64 self = (UINT64)(ULONG_PTR)pthread_self();
+    UINT64 teb_ptr = (UINT64)(ULONG_PTR)teb;
+    UINT32 i;
+
+    for (i = 0; i < ASTROWINE_THREAD_SLOT_COUNT; ++i)
+    {
+        UINT64 cur = __atomic_load_n( &astrowine_thread_slots[i].pthread_self, __ATOMIC_ACQUIRE );
+        UINT64 cur_teb = __atomic_load_n( &astrowine_thread_slots[i].pthread_teb, __ATOMIC_ACQUIRE );
+        if (cur && (cur == self || cur_teb == teb_ptr))
+        {
+            __atomic_store_n( &astrowine_thread_slots[i].stack_low, 0, __ATOMIC_RELEASE );
+            __atomic_store_n( &astrowine_thread_slots[i].stack_high, 0, __ATOMIC_RELEASE );
+            __atomic_store_n( &astrowine_thread_slots[i].thread_selfid, 0, __ATOMIC_RELEASE );
+            __atomic_store_n( &astrowine_thread_slots[i].pthread_kill_id, 0, __ATOMIC_RELEASE );
+            __atomic_store_n( &astrowine_thread_slots[i].pthread_teb, 0, __ATOMIC_RELEASE );
+            __atomic_store_n( &astrowine_thread_slots[i].pthread_self, 0, __ATOMIC_RELEASE );
+            return;
+        }
+    }
+}
+
+static UINT64 astrowine_find_thread_self_by_rsp( UINT64 rsp )
+{
+    UINT32 i;
+
+    if (!rsp) return 0;
+
+    for (i = 0; i < ASTROWINE_THREAD_SLOT_COUNT; ++i)
+    {
+        UINT64 self = __atomic_load_n( &astrowine_thread_slots[i].pthread_self, __ATOMIC_ACQUIRE );
+        UINT64 low;
+        UINT64 high;
+
+        if (!self) continue;
+        low = __atomic_load_n( &astrowine_thread_slots[i].stack_low, __ATOMIC_ACQUIRE );
+        high = __atomic_load_n( &astrowine_thread_slots[i].stack_high, __ATOMIC_ACQUIRE );
+        if (low && high && rsp >= low && rsp <= high) return self;
+    }
+    return 0;
+}
+
+static UINT64 astrowine_find_thread_self_by_thread_selfid( UINT64 thread_selfid )
+{
+    UINT32 i;
+
+    if (!thread_selfid) return 0;
+
+    for (i = 0; i < ASTROWINE_THREAD_SLOT_COUNT; ++i)
+    {
+        UINT64 self = __atomic_load_n( &astrowine_thread_slots[i].pthread_self, __ATOMIC_ACQUIRE );
+        UINT64 tid;
+
+        if (!self) continue;
+        tid = __atomic_load_n( &astrowine_thread_slots[i].thread_selfid, __ATOMIC_ACQUIRE );
+        if (tid == thread_selfid) return self;
+    }
+    return 0;
+}
+
+static void astrowine_get_slot_identities( UINT64 self, UINT64 *slot_tid, UINT64 *slot_killid )
+{
+    UINT32 i;
+
+    if (slot_tid) *slot_tid = 0;
+    if (slot_killid) *slot_killid = 0;
+    if (!self) return;
+
+    for (i = 0; i < ASTROWINE_THREAD_SLOT_COUNT; ++i)
+    {
+        UINT64 cur = __atomic_load_n( &astrowine_thread_slots[i].pthread_self, __ATOMIC_ACQUIRE );
+        if (cur == self)
+        {
+            if (slot_tid) *slot_tid = __atomic_load_n( &astrowine_thread_slots[i].thread_selfid, __ATOMIC_ACQUIRE );
+            if (slot_killid) *slot_killid = __atomic_load_n( &astrowine_thread_slots[i].pthread_kill_id, __ATOMIC_ACQUIRE );
+            return;
+        }
+    }
+}
+
 static inline struct astrowine_shm *astrowine_get_shm(void)
 {
     return (struct astrowine_shm *)((char *)user_shared_data + page_size + 0x100);
+}
+
+/* Windows 10 22H2-style syscall numbers observed from direct inline "syscall"
+ * stubs in game code. We map them to Wine's internal service indexes by
+ * matching function pointers in KeServiceDescriptorTable. */
+static struct
+{
+    UINT32 win_syscall_nr;
+    UINT32 wine_syscall_nr;
+    void *function;
+}
+astrowine_syscall_nr_translation[] =
+{
+    {0x10, ~0u, NtQueryObject},
+    {0x19, ~0u, NtQueryInformationProcess},
+    {0x8b, ~0u, NtQueryInformationProcess},
+    {0x1c, ~0u, NtSetInformationProcess},
+    {0x25, ~0u, NtQueryInformationThread},
+    {0x8c, ~0u, NtQueryInformationThread},
+    {0x0d, ~0u, NtSetInformationThread},
+    {0x36, ~0u, NtQuerySystemInformation},
+    {0xf3, ~0u, NtGetContextThread},
+    {0x33, ~0u, NtOpenFile},
+    {0x55, ~0u, NtCreateFile},
+    {0x4a, ~0u, NtCreateSection},
+    {0x28, ~0u, NtMapViewOfSection},
+    {0x2a, ~0u, NtUnmapViewOfSection},
+    {0x08, ~0u, NtWriteFile},
+    {0x06, ~0u, NtReadFile},
+    {0x0f, ~0u, NtClose},
+    {0x23, ~0u, NtQueryVirtualMemory},
+    {0x50, ~0u, NtProtectVirtualMemory},
+    {0xa6, ~0u, NtCreateDebugObject},
+    {0x3a, ~0u, NtWriteVirtualMemory},
+    {0x3f, ~0u, NtReadVirtualMemory},
+    {0xed, ~0u, NtFlushProcessWriteBuffers},
+};
+
+static void astrowine_init_syscall_translation(void)
+{
+    static LONG initialized;
+    UINT32 i, j;
+
+    if (__atomic_load_n( &initialized, __ATOMIC_ACQUIRE )) return;
+
+    for (i = 0; i < KeServiceDescriptorTable->ServiceLimit; ++i)
+    {
+        for (j = 0; j < ARRAY_SIZE(astrowine_syscall_nr_translation); ++j)
+        {
+            if ((void *)KeServiceDescriptorTable->ServiceTable[i] == astrowine_syscall_nr_translation[j].function)
+            {
+                astrowine_syscall_nr_translation[j].wine_syscall_nr = i;
+                break;
+            }
+        }
+    }
+
+    for (j = 0; j < ARRAY_SIZE(astrowine_syscall_nr_translation); ++j)
+    {
+        if (astrowine_syscall_nr_translation[j].wine_syscall_nr == ~0u)
+            WARN_(seh)( "ASTROWINE unresolved syscall translation: win %#x.\n",
+                        astrowine_syscall_nr_translation[j].win_syscall_nr );
+    }
+
+    __atomic_store_n( &initialized, 1, __ATOMIC_RELEASE );
+}
+
+static UINT32 astrowine_translate_syscall_nr( UINT32 syscall_nr )
+{
+    SYSTEM_SERVICE_TABLE *table;
+    const UINT32 table_idx = ((syscall_nr >> 8) & 0x30) >> 4;
+    const UINT32 service_idx = syscall_nr & 0xfff;
+    UINT32 i;
+    BOOL translate_enabled;
+
+    /* Keep Linux seccomp behavior by default: no remap unless explicitly enabled. */
+    static int translate_cached = -1;
+    if (translate_cached == -1)
+    {
+        const char *env = getenv( "ASTROWINE_SHM_TRANSLATE" );
+        translate_cached = (env && env[0] && strcmp( env, "0" )) ? 1 : 0;
+    }
+    translate_enabled = (translate_cached != 0);
+
+    astrowine_init_syscall_translation();
+    for (i = 0; i < ARRAY_SIZE(astrowine_syscall_nr_translation); ++i)
+    {
+        if (syscall_nr == astrowine_syscall_nr_translation[i].win_syscall_nr &&
+            astrowine_syscall_nr_translation[i].wine_syscall_nr != ~0u)
+        {
+            /* Compat auto-remap: if current service index does not resolve to the
+             * expected function, force remap even when ASTROWINE_SHM_TRANSLATE=0.
+             * This keeps direct inline Windows syscall numbers usable on macOS. */
+            if (!translate_enabled)
+            {
+                if (table_idx < ARRAY_SIZE(KeServiceDescriptorTable))
+                {
+                    table = &KeServiceDescriptorTable[table_idx];
+                    if (table->ServiceTable && service_idx < table->ServiceLimit &&
+                        (void *)table->ServiceTable[service_idx] == astrowine_syscall_nr_translation[i].function)
+                        return syscall_nr;
+                }
+                TRACE_(seh)( "SIGSYS shm compat remap win %#x -> wine %#x (translate env off).\n",
+                             syscall_nr, astrowine_syscall_nr_translation[i].wine_syscall_nr );
+            }
+            return astrowine_syscall_nr_translation[i].wine_syscall_nr;
+        }
+    }
+    return syscall_nr;
+}
+
+static BOOL astrowine_shm_active_pull_enabled(void)
+{
+    static int cached = -1;
+
+    if (cached == -1)
+    {
+        const char *env = getenv( "ASTROWINE_SHM_ACTIVE_PULL" );
+        cached = (env && env[0] && strcmp( env, "0" )) ? 1 : 0;
+    }
+    return cached != 0;
+}
+
+static BOOL astrowine_allow_active_pull_for_syscall( UINT32 win_syscall_nr )
+{
+    /* Some syscalls are thread/context-sensitive in practice; executing them on
+     * a random receiver thread can destabilize runtime or trigger self-checks. */
+    if (win_syscall_nr == 0x3a) return FALSE;
+    return TRUE;
+}
+
+static BOOL astrowine_dispatch_shm_syscall( const struct astrowine_shm *shm, UINT64 *result )
+{
+    typedef UINT64 (*astrowine_syscall_fn)( UINT64, UINT64, UINT64, UINT64, UINT64, UINT64,
+                                            UINT64, UINT64, UINT64, UINT64, UINT64, UINT64,
+                                            UINT64, UINT64 );
+    SYSTEM_SERVICE_TABLE *table;
+    astrowine_syscall_fn fn;
+    const UINT32 win_syscall_nr = (UINT32)shm->syscall_nr;
+    const UINT32 syscall_nr = astrowine_translate_syscall_nr( win_syscall_nr );
+    const UINT32 table_idx = ((syscall_nr >> 8) & 0x30) >> 4;
+    const UINT32 service_idx = syscall_nr & 0xfff;
+    UINT64 stack_args[8] = {0};
+    UINT64 arg5 = 0, arg6 = 0;
+    UINT32 extra_bytes = 0;
+    UINT32 i;
+    struct syscall_frame *frame = amd64_thread_data()->syscall_frame;
+    struct syscall_frame saved_frame;
+    BOOL frame_patched = FALSE;
+    const BOOL verbose_sensitive = (win_syscall_nr == 0x3a || win_syscall_nr == 0x8b);
+
+    if (table_idx >= ARRAY_SIZE(KeServiceDescriptorTable))
+    {
+        if (verbose_sensitive) TRACE_(seh)( "SIGSYS shm dispatch reject win %#x: bad table_idx %#x.\n",
+                                            win_syscall_nr, table_idx );
+        return FALSE;
+    }
+    table = &KeServiceDescriptorTable[table_idx];
+    if (!table->ServiceTable || !table->ArgumentTable)
+    {
+        if (verbose_sensitive) TRACE_(seh)( "SIGSYS shm dispatch reject win %#x: null service/arg table idx %#x.\n",
+                                            win_syscall_nr, table_idx );
+        return FALSE;
+    }
+    if (service_idx >= table->ServiceLimit)
+    {
+        if (verbose_sensitive) TRACE_(seh)( "SIGSYS shm dispatch reject win %#x: service_idx %#x >= limit %#x.\n",
+                                            win_syscall_nr, service_idx, table->ServiceLimit );
+        return FALSE;
+    }
+    if (syscall_nr != win_syscall_nr)
+        TRACE_(seh)( "SIGSYS shm active-pull remap win %#x -> wine %#x.\n", win_syscall_nr, syscall_nr );
+
+    if (table->ArgumentTable[service_idx] > 0x30)
+        extra_bytes = table->ArgumentTable[service_idx] - 0x30;
+
+    if (shm->rsp)
+    {
+        const SIZE_T need_bytes = 0x38 + min( extra_bytes, (UINT32)(sizeof(stack_args)) );
+        const UINT64 *src = (const UINT64 *)(ULONG_PTR)shm->rsp;
+        if (!virtual_check_buffer_for_read( (const void *)(ULONG_PTR)shm->rsp, need_bytes ))
+        {
+            if (verbose_sensitive)
+                TRACE_(seh)( "SIGSYS shm dispatch reject win %#x: unreadable rsp %#llx need %#llx.\n",
+                             win_syscall_nr, (unsigned long long)shm->rsp, (unsigned long long)need_bytes );
+            return FALSE;
+        }
+        arg5 = src[5];
+        arg6 = src[6];
+        for (i = 0; i < ARRAY_SIZE(stack_args) && i * sizeof(UINT64) < extra_bytes; ++i)
+            stack_args[i] = src[7 + i];
+    }
+
+    fn = (astrowine_syscall_fn)table->ServiceTable[service_idx];
+    if (!fn)
+    {
+        if (verbose_sensitive) TRACE_(seh)( "SIGSYS shm dispatch reject win %#x: null fn service_idx %#x.\n",
+                                            win_syscall_nr, service_idx );
+        return FALSE;
+    }
+
+    if (frame)
+    {
+        saved_frame = *frame;
+        frame->rax = syscall_nr;
+        frame->rbx = shm->rbx;
+        frame->rdx = shm->rdx;
+        frame->rsi = shm->rsi;
+        frame->rdi = shm->rdi;
+        frame->r8  = shm->r8;
+        frame->r9  = shm->r9;
+        frame->r10 = shm->r10;
+        frame->r12 = shm->r12;
+        frame->r13 = shm->r13;
+        frame->r14 = shm->r14;
+        frame->r15 = shm->r15;
+        frame->rip = shm->syscall_rip;
+        frame->rsp = shm->rsp;
+        frame->rbp = shm->rbp;
+        frame_patched = TRUE;
+    }
+
+    if (win_syscall_nr == 0x3f || win_syscall_nr == 0x3a)
+        TRACE_(seh)( "SIGSYS shm dispatch win %#x wine %#x args r10=%#llx rdx=%#llx r8=%#llx r9=%#llx arg5=%#llx arg6=%#llx rip=%#llx rsp=%#llx.\n",
+                     win_syscall_nr, syscall_nr,
+                     (unsigned long long)shm->r10, (unsigned long long)shm->rdx,
+                     (unsigned long long)shm->r8, (unsigned long long)shm->r9,
+                     (unsigned long long)arg5, (unsigned long long)arg6,
+                     (unsigned long long)shm->syscall_rip, (unsigned long long)shm->rsp );
+
+    *result = fn( shm->r10, shm->rdx, shm->r8, shm->r9, arg5, arg6,
+                  stack_args[0], stack_args[1], stack_args[2], stack_args[3],
+                  stack_args[4], stack_args[5], stack_args[6], stack_args[7] );
+    if (frame_patched) *frame = saved_frame;
+    return TRUE;
 }
 
 static void sigsys_handler( int signal, siginfo_t *siginfo, void *sigcontext )
@@ -3352,34 +3738,212 @@ static void sigsys_handler( int signal, siginfo_t *siginfo, void *sigcontext )
     UINT64 trap_rax = RAX_sig(ucontext);
     UINT64 trap_rip = RIP_sig(ucontext);
     UINT64 trap_eflags = EFL_sig(ucontext);
+    TEB *teb = NtCurrentTeb();
+    UINT64 current_pthread_teb = (UINT64)(ULONG_PTR)amd64_thread_data()->pthread_teb;
+    UINT64 current_pthread_self = (UINT64)(ULONG_PTR)pthread_self();
+    UINT64 current_pthread_kill_id = *(const UINT32 *)((const char *)pthread_self() + 0xf8);
+    UINT64 current_thread_selfid = 0;
+    UINT64 current_stack_low = (UINT64)(ULONG_PTR)teb->Tib.StackLimit;
+    UINT64 current_stack_high = (UINT64)(ULONG_PTR)teb->Tib.StackBase;
+    BOOL from_shm = FALSE;
+    BOOL sender_match = FALSE;
+    BOOL stack_match = FALSE;
+    BOOL trap_looks_win_syscall = FALSE;
+    BOOL active_pull = astrowine_shm_active_pull_enabled();
+    UINT32 shm_pending = 0;
+    UINT32 shm_result_ready = 0;
+    UINT32 reroute_wait;
+
+#ifdef SYS_thread_selfid
+    current_thread_selfid = syscall( SYS_thread_selfid );
+#endif
+    trap_looks_win_syscall = ((trap_rax & ~0xfffull) == 0 && trap_rip && trap_rip < 0x800000000000ull);
+    if (shm) shm_pending = __atomic_load_n( &shm->pending, __ATOMIC_ACQUIRE );
+    if (shm) shm_result_ready = __atomic_load_n( &shm->result_ready, __ATOMIC_ACQUIRE );
+
+    /* Active-pull may complete on a different thread before the sender-directed
+     * SIGSYS is delivered. Ignore that late signal to avoid dispatching a stale
+     * Windows syscall number through the local trap path. */
+    if (shm && shm->magic == ASTROWINE_SHM_MAGIC && shm->version == ASTROWINE_SHM_VERSION &&
+        shm_pending == 0 && shm_result_ready == 1 &&
+        (UINT32)trap_rax == (UINT32)shm->syscall_nr)
+    {
+        TRACE_(seh)( "SIGSYS shm late sender signal ignored for syscall %#llx.\n",
+                     (unsigned long long)shm->syscall_nr );
+        return;
+    }
 
     /* If a Rosetta-side hook raised SIGSYS, override the trap context from shared memory. */
     if (shm && shm->magic == ASTROWINE_SHM_MAGIC && shm->version == ASTROWINE_SHM_VERSION &&
-        __atomic_load_n( &shm->pending, __ATOMIC_ACQUIRE ) == 1)
+        shm_pending == 1)
     {
-        trap_rax = shm->syscall_nr;
-        if (shm->syscall_rip) trap_rip = shm->syscall_rip;
-        RBX_sig(ucontext) = shm->rbx;
-        RDX_sig(ucontext) = shm->rdx;
-        RSI_sig(ucontext) = shm->rsi;
-        RDI_sig(ucontext) = shm->rdi;
-        RSP_sig(ucontext) = shm->rsp;
-        RBP_sig(ucontext) = shm->rbp;
-        R8_sig(ucontext)  = shm->r8;
-        R9_sig(ucontext)  = shm->r9;
-        R10_sig(ucontext) = shm->r10;
-        R12_sig(ucontext) = shm->r12;
-        R13_sig(ucontext) = shm->r13;
-        R14_sig(ucontext) = shm->r14;
-        R15_sig(ucontext) = shm->r15;
-        __atomic_store_n( &shm->pending, 0, __ATOMIC_RELEASE );
+        stack_match = (shm->rsp >= current_stack_low && shm->rsp <= current_stack_high);
+        sender_match = ((shm->sender_pthread_teb &&
+                         shm->sender_pthread_teb == current_pthread_teb) ||
+                        (shm->sender_pthread_self &&
+                         shm->sender_pthread_self == current_pthread_self) ||
+                        (shm->sender_thread_selfid && current_thread_selfid &&
+                         shm->sender_thread_selfid == current_thread_selfid) ||
+                        (shm->sender_pthread_kill_id && current_pthread_kill_id &&
+                         shm->sender_pthread_kill_id == current_pthread_kill_id) ||
+                        stack_match);
+        TRACE_(seh)( "SIGSYS shm identity cur_self %#llx cur_teb %#llx cur_tid %#llx cur_killid %#llx "
+                     "sender_self %#llx sender_teb %#llx sender_tid %#llx sender_killid %#llx stack_match %u sender_match %u.\n",
+                     (unsigned long long)current_pthread_self, (unsigned long long)current_pthread_teb,
+                     (unsigned long long)current_thread_selfid, (unsigned long long)current_pthread_kill_id,
+                     (unsigned long long)shm->sender_pthread_self, (unsigned long long)shm->sender_pthread_teb,
+                     (unsigned long long)shm->sender_thread_selfid, (unsigned long long)shm->sender_pthread_kill_id,
+                     stack_match, sender_match );
+        if (sender_match)
+        {
+            trap_rax = astrowine_translate_syscall_nr( (UINT32)shm->syscall_nr );
+            if (trap_rax != shm->syscall_nr)
+                TRACE_(seh)( "SIGSYS shm remap win %#llx -> wine %#llx for dispatcher path.\n",
+                             (unsigned long long)shm->syscall_nr, (unsigned long long)trap_rax );
+            if (shm->syscall_rip) trap_rip = shm->syscall_rip;
+            RBX_sig(ucontext) = shm->rbx;
+            RDX_sig(ucontext) = shm->rdx;
+            RSI_sig(ucontext) = shm->rsi;
+            RDI_sig(ucontext) = shm->rdi;
+            RSP_sig(ucontext) = shm->rsp;
+            RBP_sig(ucontext) = shm->rbp;
+            R8_sig(ucontext)  = shm->r8;
+            R9_sig(ucontext)  = shm->r9;
+            R10_sig(ucontext) = shm->r10;
+            R12_sig(ucontext) = shm->r12;
+            R13_sig(ucontext) = shm->r13;
+            R14_sig(ucontext) = shm->r14;
+            R15_sig(ucontext) = shm->r15;
+            __atomic_store_n( &shm->pending, 0, __ATOMIC_RELEASE );
+            from_shm = TRUE;
 
-        RAX_sig(ucontext) = trap_rax;
-        RIP_sig(ucontext) = trap_rip;
+            RAX_sig(ucontext) = trap_rax;
+            RIP_sig(ucontext) = trap_rip;
+        }
     }
 
     TRACE_(seh)("SIGSYS, rax %#llx, rip %#llx.\n", (unsigned long long)trap_rax,
                 (unsigned long long)trap_rip);
+    if (shm)
+        TRACE_(seh)("SIGSYS shm state magic %#llx ver %u pending %u.\n",
+                (unsigned long long)shm->magic, shm->version, shm_pending);
+    if (shm && shm_pending == 1 && !sender_match)
+    {
+        if (trap_looks_win_syscall && (UINT32)trap_rax != (UINT32)shm->syscall_nr)
+        {
+            TRACE_(seh)( "SIGSYS shm conflict: trap syscall %#llx differs from pending %#llx (si_code %d), defer shm and keep local trap path.\n",
+                         (unsigned long long)trap_rax, (unsigned long long)shm->syscall_nr,
+                         siginfo ? siginfo->si_code : 0 );
+            if (active_pull && astrowine_allow_active_pull_for_syscall( (UINT32)shm->syscall_nr ))
+            {
+                UINT64 pull_result = 0;
+                if (astrowine_dispatch_shm_syscall( shm, &pull_result ))
+                {
+                    shm->result_rax = pull_result;
+                    __atomic_store_n( &shm->result_ready, 1, __ATOMIC_RELEASE );
+                    __atomic_store_n( &shm->pending, 0, __ATOMIC_RELEASE );
+                    TRACE_(seh)( "SIGSYS shm conflict active-pull consumed pending syscall %#llx result %#llx.\n",
+                                 (unsigned long long)shm->syscall_nr, (unsigned long long)pull_result );
+                }
+            }
+        }
+        else
+        {
+        if (active_pull && astrowine_allow_active_pull_for_syscall( (UINT32)shm->syscall_nr ))
+        {
+            UINT64 pull_result = 0;
+            if (astrowine_dispatch_shm_syscall( shm, &pull_result ))
+            {
+                shm->result_rax = pull_result;
+                __atomic_store_n( &shm->result_ready, 1, __ATOMIC_RELEASE );
+                __atomic_store_n( &shm->pending, 0, __ATOMIC_RELEASE );
+                TRACE_(seh)("SIGSYS shm active-pull consumed syscall %#llx result %#llx sender_rsp %#llx.\n",
+                        (unsigned long long)shm->syscall_nr, (unsigned long long)pull_result,
+                        (unsigned long long)shm->rsp );
+                return;
+            }
+            TRACE_(seh)("SIGSYS shm active-pull failed for syscall %#llx sender_rsp %#llx; fallback reroute.\n",
+                    (unsigned long long)shm->syscall_nr, (unsigned long long)shm->rsp );
+        }
+        else if (active_pull)
+        {
+            TRACE_(seh)("SIGSYS shm active-pull disabled for syscall %#llx; forcing reroute.\n",
+                    (unsigned long long)shm->syscall_nr );
+        }
+
+        int reroute_pthread_result = -1;
+        long reroute_syscall_result = -1;
+        UINT64 reroute_killid = 0;
+        UINT64 reroute_stack_self = astrowine_find_thread_self_by_rsp( shm->rsp );
+        UINT64 reroute_sender_tid_self = astrowine_find_thread_self_by_thread_selfid( shm->sender_thread_selfid );
+        UINT64 sender_slot_tid = 0, sender_slot_killid = 0;
+        UINT64 stack_slot_tid = 0, stack_slot_killid = 0;
+        UINT64 tid_slot_tid = 0, tid_slot_killid = 0;
+        astrowine_get_slot_identities( shm->sender_pthread_self, &sender_slot_tid, &sender_slot_killid );
+        astrowine_get_slot_identities( reroute_stack_self, &stack_slot_tid, &stack_slot_killid );
+        astrowine_get_slot_identities( reroute_sender_tid_self, &tid_slot_tid, &tid_slot_killid );
+        if (!reroute_stack_self && reroute_sender_tid_self) reroute_stack_self = reroute_sender_tid_self;
+        if (reroute_stack_self)
+            reroute_pthread_result = pthread_kill( (pthread_t)(ULONG_PTR)reroute_stack_self, SIGSYS );
+        if (reroute_pthread_result != 0 && reroute_sender_tid_self &&
+            reroute_sender_tid_self != reroute_stack_self)
+            reroute_pthread_result = pthread_kill( (pthread_t)(ULONG_PTR)reroute_sender_tid_self, SIGSYS );
+        if (reroute_pthread_result != 0 && shm->sender_pthread_self)
+            reroute_pthread_result = pthread_kill( (pthread_t)(ULONG_PTR)shm->sender_pthread_self, SIGSYS );
+#ifdef SYS___pthread_kill
+        reroute_killid = stack_slot_killid ? stack_slot_killid : tid_slot_killid;
+        if (!reroute_killid) reroute_killid = sender_slot_killid;
+        if (!reroute_killid) reroute_killid = shm->sender_pthread_kill_id;
+        if (reroute_killid)
+            reroute_syscall_result = syscall( SYS___pthread_kill, (UINT32)reroute_killid, SIGSYS );
+#endif
+        TRACE_(seh)("SIGSYS shm sender mismatch cur_self %#llx cur_teb %#llx cur_tid %#llx cur_killid %#llx stack[%#llx-%#llx] sender_rsp %#llx sender_self %#llx sender_teb %#llx sender_tid %#llx sender_killid %#llx unmask %#llx raise_stage %#llx raise_result %#llx.\n",
+                (unsigned long long)current_pthread_self, (unsigned long long)current_pthread_teb,
+                (unsigned long long)current_thread_selfid, (unsigned long long)current_pthread_kill_id,
+                (unsigned long long)current_stack_low, (unsigned long long)current_stack_high,
+                (unsigned long long)shm->rsp,
+                (unsigned long long)shm->sender_pthread_self,
+                (unsigned long long)shm->sender_pthread_teb, (unsigned long long)shm->sender_thread_selfid,
+                (unsigned long long)shm->sender_pthread_kill_id, (unsigned long long)shm->sender_unmask_result,
+                (unsigned long long)shm->sender_raise_stage, (unsigned long long)shm->sender_raise_result);
+        TRACE_(seh)("SIGSYS shm reroute attempt stack_self %#llx stack_slot_tid %#llx stack_slot_killid %#llx tid_self %#llx tid_slot_tid %#llx tid_slot_killid %#llx sender_self %#llx sender_slot_tid %#llx sender_slot_killid %#llx pthread_kill %d sender_killid %#llx syscall %ld.\n",
+                (unsigned long long)reroute_stack_self, (unsigned long long)stack_slot_tid, (unsigned long long)stack_slot_killid,
+                (unsigned long long)reroute_sender_tid_self, (unsigned long long)tid_slot_tid, (unsigned long long)tid_slot_killid,
+                (unsigned long long)shm->sender_pthread_self, (unsigned long long)sender_slot_tid, (unsigned long long)sender_slot_killid,
+                reroute_pthread_result,
+                (unsigned long long)reroute_killid, reroute_syscall_result);
+        for (reroute_wait = 0; reroute_wait < 5000000u; ++reroute_wait)
+        {
+            if (__atomic_load_n( &shm->pending, __ATOMIC_ACQUIRE ) == 0)
+            {
+                TRACE_(seh)( "SIGSYS shm reroute consumed by sender after %u spins.\n", reroute_wait );
+                return;
+            }
+            __asm__ volatile("pause");
+        }
+        /* If sender-directed reroute still didn't consume the request, do a
+         * local best-effort dispatch to avoid leaving pending set long enough
+         * for payload timeout reuse races across threads. */
+        {
+            UINT64 fallback_result = 0;
+            if (astrowine_dispatch_shm_syscall( shm, &fallback_result ))
+            {
+                shm->result_rax = fallback_result;
+                __atomic_store_n( &shm->result_ready, 1, __ATOMIC_RELEASE );
+                __atomic_store_n( &shm->pending, 0, __ATOMIC_RELEASE );
+                TRACE_(seh)( "SIGSYS shm reroute-timeout fallback consumed syscall %#llx result %#llx.\n",
+                             (unsigned long long)shm->syscall_nr, (unsigned long long)fallback_result );
+                return;
+            }
+        }
+        TRACE_(seh)( "SIGSYS shm reroute pending stayed set; skip local dispatcher path.\n" );
+        return;
+        }
+    }
+    if (from_shm)
+        TRACE_(seh)("SIGSYS from shm, rsp %#llx rbp %#llx r10 %#llx.\n",
+                (unsigned long long)RSP_sig(ucontext), (unsigned long long)RBP_sig(ucontext),
+                (unsigned long long)R10_sig(ucontext));
 
     /* Keep parity with Linux install_bpf test path. */
     if (trap_rax == 0xffff)
@@ -3556,6 +4120,9 @@ void signal_free_thread( TEB *teb )
         __wine_ldt_copy.flags[thread_data->fs >> 3] = 0;
         server_leave_uninterrupted_section( &ldt_mutex, &sigset );
     }
+#ifdef __APPLE__
+    astrowine_unregister_thread_slot( teb );
+#endif
 }
 
 #ifdef __APPLE__
@@ -3638,8 +4205,19 @@ void signal_init_process(void)
         shm->magic = ASTROWINE_SHM_MAGIC;
         shm->version = ASTROWINE_SHM_VERSION;
         shm->pending = 0;
+        shm->result_ready = 0;
+        shm->_pad_result = 0;
+        shm->_pad_result2 = 0;
         shm->syscall_nr = 0;
         shm->syscall_rip = 0;
+        shm->result_rax = 0;
+        shm->sender_pthread_self = 0;
+        shm->sender_pthread_teb = 0;
+        shm->sender_thread_selfid = 0;
+        shm->sender_pthread_kill_id = 0;
+        shm->sender_unmask_result = 0;
+        shm->sender_raise_stage = 0;
+        shm->sender_raise_result = 0;
         shm->rbx = 0;
         shm->rdx = 0;
         shm->rsi = 0;
@@ -3749,6 +4327,7 @@ void set_thread_teb( TEB *teb )
     thread_data->pthread_teb = mac_thread_gsbase();
     /* Store gsbase for alloc_tls_slot() lookups on macOS. */
     teb->Instrumentation[0] = thread_data->pthread_teb;
+    astrowine_register_thread_slot( teb );
 #else
 # error Please define setting %gs for your architecture
 #endif
@@ -3788,6 +4367,7 @@ __attribute__((used)) void call_init_thunk( LPTHREAD_START_ROUTINE entry, void *
        thread's gsbase.  Have each thread record its gsbase pointer into its
        TEB so alloc_tls_slot() can find it. */
     teb->Instrumentation[0] = thread_data->pthread_teb;
+    astrowine_register_thread_slot( teb );
 #else
 # error Please define setting %gs for your architecture
 #endif

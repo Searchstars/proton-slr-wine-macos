@@ -4060,6 +4060,149 @@ NTSTATUS WINAPI DECLSPEC_HOTPATCH LdrLoadDll(LPCWSTR search_path, DWORD *load_fl
     return nts;
 }
 
+static BOOL astrowine_ace_autoload_enabled(void)
+{
+    static int cached = -1;
+
+    if (cached == -1)
+    {
+        WCHAR value[8];
+        cached = (get_env( L"ASTROWINE_ACE_AUTOLOAD", value, ARRAY_SIZE(value) ) &&
+                  value[0] && wcscmp( value, L"0" )) ? 1 : 0;
+    }
+    return cached != 0;
+}
+
+static BOOL astrowine_try_set_mask_bit( LONG *mask, LONG bit )
+{
+    LONG old_value, new_value;
+
+    do
+    {
+        old_value = *mask;
+        if (old_value & bit) return FALSE;
+        new_value = old_value | bit;
+    } while (InterlockedCompareExchange( mask, new_value, old_value ) != old_value);
+
+    return TRUE;
+}
+
+static void astrowine_clear_mask_bit( LONG *mask, LONG bit )
+{
+    LONG old_value, new_value;
+
+    do
+    {
+        old_value = *mask;
+        new_value = old_value & ~bit;
+    } while (InterlockedCompareExchange( mask, new_value, old_value ) != old_value);
+}
+
+static BOOL astrowine_match_ace_probe( const UNICODE_STRING *name, const WCHAR **module_name, LONG *module_bit )
+{
+    static const WCHAR ace_pbcW[] = L"ACE-PBC-Game64.dll";
+    static const WCHAR ace_gdpW[] = L"ACE-GDP64.dll";
+    static const WCHAR ace_csiW[] = L"ACE-CSI64.dll";
+    static const WCHAR ace_sscW[] = L"ACE-SSC64.dll";
+    const WCHAR *s;
+    ULONG len, i;
+
+    if (!name || !name->Buffer) return FALSE;
+    s = name->Buffer;
+    len = name->Length / sizeof(WCHAR);
+    for (i = 0; i < len; ++i) if (s[i] == '\\' || s[i] == '/' || s[i] == ':') return FALSE;
+    if (!len) return FALSE;
+
+    if (!RtlCompareUnicodeStrings( s, len, ace_pbcW, ARRAY_SIZE(ace_pbcW) - 1, TRUE ))
+    {
+        *module_name = ace_pbcW;
+        *module_bit = 1 << 0;
+        return TRUE;
+    }
+    if (!RtlCompareUnicodeStrings( s, len, ace_gdpW, ARRAY_SIZE(ace_gdpW) - 1, TRUE ))
+    {
+        *module_name = ace_gdpW;
+        *module_bit = 1 << 1;
+        return TRUE;
+    }
+    if (!RtlCompareUnicodeStrings( s, len, ace_csiW, ARRAY_SIZE(ace_csiW) - 1, TRUE ))
+    {
+        *module_name = ace_csiW;
+        *module_bit = 1 << 2;
+        return TRUE;
+    }
+    if (!RtlCompareUnicodeStrings( s, len, ace_sscW, ARRAY_SIZE(ace_sscW) - 1, TRUE ))
+    {
+        *module_name = ace_sscW;
+        *module_bit = 1 << 3;
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static NTSTATUS astrowine_try_autoload_ace_module( const UNICODE_STRING *name, HMODULE *base )
+{
+    static const WCHAR ace_dirW[] = L"AntiCheatExpert\\";
+    static LONG in_progress_mask;
+    static LONG attempted_mask;
+    RTL_USER_PROCESS_PARAMETERS *params = NtCurrentTeb()->Peb->ProcessParameters;
+    const WCHAR *module_name;
+    LONG module_bit;
+    WCHAR *fullpath, *dst;
+    ULONG image_len, dir_len, module_len, total_len;
+    UNICODE_STRING module_path;
+    NTSTATUS status = STATUS_DLL_NOT_FOUND;
+
+    if (!astrowine_match_ace_probe( name, &module_name, &module_bit )) return STATUS_DLL_NOT_FOUND;
+    if (!params || !params->ImagePathName.Buffer) return STATUS_DLL_NOT_FOUND;
+    if (!astrowine_try_set_mask_bit( &in_progress_mask, module_bit ))
+    {
+        TRACE( "ASTROWINE ACE autoload skip in-progress probe %s.\n", debugstr_us(name) );
+        return STATUS_DLL_NOT_FOUND;
+    }
+    if (!astrowine_try_set_mask_bit( &attempted_mask, module_bit ))
+    {
+        TRACE( "ASTROWINE ACE autoload skip already-attempted probe %s.\n", debugstr_us(name) );
+        astrowine_clear_mask_bit( &in_progress_mask, module_bit );
+        return STATUS_DLL_NOT_FOUND;
+    }
+
+    image_len = params->ImagePathName.Length / sizeof(WCHAR);
+    for (dir_len = image_len; dir_len; --dir_len)
+    {
+        WCHAR c = params->ImagePathName.Buffer[dir_len - 1];
+        if (c == '\\' || c == '/') break;
+    }
+    if (!dir_len) goto done;
+
+    module_len = wcslen( module_name );
+    total_len = dir_len + ARRAY_SIZE(ace_dirW) - 1 + module_len;
+    if (!(fullpath = RtlAllocateHeap( GetProcessHeap(), 0, (total_len + 1) * sizeof(WCHAR) )))
+    {
+        status = STATUS_NO_MEMORY;
+        goto done;
+    }
+
+    dst = fullpath;
+    memcpy( dst, params->ImagePathName.Buffer, dir_len * sizeof(WCHAR) );
+    dst += dir_len;
+    memcpy( dst, ace_dirW, (ARRAY_SIZE(ace_dirW) - 1) * sizeof(WCHAR) );
+    dst += ARRAY_SIZE(ace_dirW) - 1;
+    memcpy( dst, module_name, module_len * sizeof(WCHAR) );
+    dst += module_len;
+    *dst = 0;
+
+    RtlInitUnicodeString( &module_path, fullpath );
+    TRACE( "ASTROWINE ACE autoload %s for probe %s.\n", debugstr_w(fullpath), debugstr_us(name) );
+    status = LdrLoadDll( NULL, 0, &module_path, base );
+    TRACE( "ASTROWINE ACE autoload result %s status %#lx base %p.\n",
+           debugstr_w(fullpath), status, !status ? *base : NULL );
+    RtlFreeHeap( GetProcessHeap(), 0, fullpath );
+done:
+    astrowine_clear_mask_bit( &in_progress_mask, module_bit );
+    return status;
+}
+
 
 /******************************************************************
  *		LdrGetDllFullName (NTDLL.@)
@@ -4142,6 +4285,18 @@ NTSTATUS WINAPI LdrGetDllHandleEx( ULONG flags, LPCWSTR load_path, ULONG *dll_ch
 
     RtlLeaveCriticalSection( &loader_section );
     RtlFreeHeap( GetProcessHeap(), 0, dllname );
+
+    if (status == STATUS_DLL_NOT_FOUND && base && astrowine_ace_autoload_enabled())
+    {
+        HMODULE loaded = NULL;
+        NTSTATUS autoload_status = astrowine_try_autoload_ace_module( name, &loaded );
+        if (!autoload_status)
+        {
+            *base = loaded;
+            status = STATUS_SUCCESS;
+        }
+    }
+
     TRACE( "%s -> %p (load path %s)\n", debugstr_us(name), status ? NULL : *base, debugstr_w(load_path) );
     return status;
 }

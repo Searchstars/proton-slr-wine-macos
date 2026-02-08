@@ -91,6 +91,10 @@ if [ -n "$BUILD_ENV_NEEDED" ]; then
   } > "$BUILD_ENV_FILE"
 fi
 
+if [ "${ENABLE_DXMT:-0}" = "1" ]; then
+  echo "configure_debug.sh: ENABLE_DXMT=1 only writes DXMT settings to build.env; run ./integrate_dxmt.sh to build and install DXMT DLLs." >&2
+fi
+
 TOMCRYPT_PE_CFLAGS=${TOMCRYPT_PE_CFLAGS:-"$TOMCRYPT_INCLUDE_PATH"}
 TOMCRYPT_PE_LIBS="-L$PWD/libs/tomcrypt/x86_64-windows -ltomcrypt"
 CPPFLAGS=${CPPFLAGS:-"$TOMCRYPT_INCLUDE_PATH"}

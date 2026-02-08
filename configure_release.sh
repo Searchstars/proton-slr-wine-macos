@@ -54,6 +54,10 @@ if [ -n "$BUILD_ENV_NEEDED" ]; then
   } > "$BUILD_ENV_FILE"
 fi
 
+if [ "${ENABLE_DXMT:-0}" = "1" ]; then
+  echo "configure_release.sh: ENABLE_DXMT=1 only writes DXMT settings to build.env; run ./integrate_dxmt.sh to build and install DXMT DLLs." >&2
+fi
+
 CFLAGS=${CFLAGS:-"-O2 -g0"}
 CXXFLAGS=${CXXFLAGS:-"-O2 -g0"}
 export CFLAGS CXXFLAGS

@@ -3483,13 +3483,25 @@ done:
 
 static struct wined3d_adapter *wined3d_adapter_create(unsigned int ordinal, DWORD wined3d_creation_flags)
 {
+    struct wined3d_adapter *adapter;
+
     if (wined3d_creation_flags & WINED3D_NO3D)
         return wined3d_adapter_no3d_create(ordinal, wined3d_creation_flags);
 
     if (wined3d_settings.renderer == WINED3D_RENDERER_VULKAN)
-        return wined3d_adapter_vk_create(ordinal, wined3d_creation_flags);
+    {
+        if ((adapter = wined3d_adapter_vk_create(ordinal, wined3d_creation_flags)))
+            return adapter;
 
-    return wined3d_adapter_gl_create(ordinal, wined3d_creation_flags);
+        WARN("Failed to create Vulkan adapter, falling back to no3d.\n");
+        return wined3d_adapter_no3d_create(ordinal, wined3d_creation_flags | WINED3D_NO3D);
+    }
+
+    if ((adapter = wined3d_adapter_gl_create(ordinal, wined3d_creation_flags)))
+        return adapter;
+
+    WARN("Failed to create OpenGL adapter, falling back to no3d.\n");
+    return wined3d_adapter_no3d_create(ordinal, wined3d_creation_flags | WINED3D_NO3D);
 }
 
 static void STDMETHODCALLTYPE wined3d_null_wined3d_object_destroyed(void *parent) {}
