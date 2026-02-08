@@ -3561,9 +3561,6 @@ static void astrowine_init_syscall_translation(void)
 
 static UINT32 astrowine_translate_syscall_nr( UINT32 syscall_nr )
 {
-    SYSTEM_SERVICE_TABLE *table;
-    const UINT32 table_idx = ((syscall_nr >> 8) & 0x30) >> 4;
-    const UINT32 service_idx = syscall_nr & 0xfff;
     UINT32 i;
     BOOL translate_enabled;
 
@@ -3576,27 +3573,16 @@ static UINT32 astrowine_translate_syscall_nr( UINT32 syscall_nr )
     }
     translate_enabled = (translate_cached != 0);
 
+    /* Strict no-translate mode: mirror no-hook SIGSYS behavior and keep
+     * original Windows syscall numbers for dispatcher path parity. */
+    if (!translate_enabled) return syscall_nr;
+
     astrowine_init_syscall_translation();
     for (i = 0; i < ARRAY_SIZE(astrowine_syscall_nr_translation); ++i)
     {
         if (syscall_nr == astrowine_syscall_nr_translation[i].win_syscall_nr &&
             astrowine_syscall_nr_translation[i].wine_syscall_nr != ~0u)
         {
-            /* Compat auto-remap: if current service index does not resolve to the
-             * expected function, force remap even when ASTROWINE_SHM_TRANSLATE=0.
-             * This keeps direct inline Windows syscall numbers usable on macOS. */
-            if (!translate_enabled)
-            {
-                if (table_idx < ARRAY_SIZE(KeServiceDescriptorTable))
-                {
-                    table = &KeServiceDescriptorTable[table_idx];
-                    if (table->ServiceTable && service_idx < table->ServiceLimit &&
-                        (void *)table->ServiceTable[service_idx] == astrowine_syscall_nr_translation[i].function)
-                        return syscall_nr;
-                }
-                TRACE_(seh)( "SIGSYS shm compat remap win %#x -> wine %#x (translate env off).\n",
-                             syscall_nr, astrowine_syscall_nr_translation[i].wine_syscall_nr );
-            }
             return astrowine_syscall_nr_translation[i].wine_syscall_nr;
         }
     }

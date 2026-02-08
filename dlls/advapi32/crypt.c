@@ -215,10 +215,25 @@ static void CALLBACK CRYPT_ReturnhWnd(HWND *phWnd)
 	if ( !(provider->pFuncs->p##name = (void*)GetProcAddress(provider->hModule, #name)) ) goto error
 #define CRYPT_GetProvFuncOpt(name) \
 	provider->pFuncs->p##name = (void*)GetProcAddress(provider->hModule, #name)
+static FARPROC CRYPT_GetProviderProc( HMODULE module, const char *name, WORD ordinal, BOOL allow_ordinal )
+{
+    FARPROC proc = GetProcAddress( module, name );
+    if (!proc && allow_ordinal && ordinal)
+        proc = GetProcAddress( module, (const char *)(ULONG_PTR)ordinal );
+    return proc;
+}
+
 static PCRYPTPROV CRYPT_LoadProvider(PCWSTR pImage)
 {
 	PCRYPTPROV provider;
 	DWORD errorcode = ERROR_NOT_ENOUGH_MEMORY;
+    BOOL allow_ordinal = FALSE;
+    static const WCHAR rsaenhW[] = L"rsaenh.dll";
+    const WCHAR *name = pImage;
+
+    if (name && (name = wcsrchr( name, '\\' ))) name++;
+    else name = pImage;
+    if (name && !wcsicmp( name, rsaenhW )) allow_ordinal = TRUE;
 
 	if ( !(provider = CRYPT_Alloc(sizeof(CRYPTPROV))) ) goto error;
 	if ( !(provider->pFuncs = CRYPT_Alloc(sizeof(PROVFUNCS))) ) goto error;
@@ -233,31 +248,56 @@ static PCRYPTPROV CRYPT_LoadProvider(PCWSTR pImage)
 	provider->refcount = 1;
 
 	errorcode = NTE_PROVIDER_DLL_FAIL;
-	CRYPT_GetProvFunc(CPAcquireContext);
-	CRYPT_GetProvFunc(CPCreateHash);
-	CRYPT_GetProvFunc(CPDecrypt);
-	CRYPT_GetProvFunc(CPDeriveKey);
-	CRYPT_GetProvFunc(CPDestroyHash);
-	CRYPT_GetProvFunc(CPDestroyKey);
-	CRYPT_GetProvFuncOpt(CPDuplicateHash);
-	CRYPT_GetProvFuncOpt(CPDuplicateKey);
-	CRYPT_GetProvFunc(CPEncrypt);
-	CRYPT_GetProvFunc(CPExportKey);
-	CRYPT_GetProvFunc(CPGenKey);
-	CRYPT_GetProvFunc(CPGenRandom);
-	CRYPT_GetProvFunc(CPGetHashParam);
-	CRYPT_GetProvFunc(CPGetKeyParam);
-	CRYPT_GetProvFunc(CPGetProvParam);
-	CRYPT_GetProvFunc(CPGetUserKey);
-	CRYPT_GetProvFunc(CPHashData);
-	CRYPT_GetProvFunc(CPHashSessionKey);
-	CRYPT_GetProvFunc(CPImportKey);
-	CRYPT_GetProvFunc(CPReleaseContext);
-	CRYPT_GetProvFunc(CPSetHashParam);
-	CRYPT_GetProvFunc(CPSetKeyParam);
-	CRYPT_GetProvFunc(CPSetProvParam);
-	CRYPT_GetProvFunc(CPSignHash);
-	CRYPT_GetProvFunc(CPVerifySignature);
+    provider->pFuncs->pCPAcquireContext = (void *)CRYPT_GetProviderProc( provider->hModule, "CPAcquireContext", 1, allow_ordinal );
+    provider->pFuncs->pCPCreateHash = (void *)CRYPT_GetProviderProc( provider->hModule, "CPCreateHash", 2, allow_ordinal );
+    provider->pFuncs->pCPDecrypt = (void *)CRYPT_GetProviderProc( provider->hModule, "CPDecrypt", 3, allow_ordinal );
+    provider->pFuncs->pCPDeriveKey = (void *)CRYPT_GetProviderProc( provider->hModule, "CPDeriveKey", 4, allow_ordinal );
+    provider->pFuncs->pCPDestroyHash = (void *)CRYPT_GetProviderProc( provider->hModule, "CPDestroyHash", 5, allow_ordinal );
+    provider->pFuncs->pCPDestroyKey = (void *)CRYPT_GetProviderProc( provider->hModule, "CPDestroyKey", 6, allow_ordinal );
+    provider->pFuncs->pCPDuplicateHash = (void *)CRYPT_GetProviderProc( provider->hModule, "CPDuplicateHash", 7, allow_ordinal );
+    provider->pFuncs->pCPDuplicateKey = (void *)CRYPT_GetProviderProc( provider->hModule, "CPDuplicateKey", 8, allow_ordinal );
+    provider->pFuncs->pCPEncrypt = (void *)CRYPT_GetProviderProc( provider->hModule, "CPEncrypt", 9, allow_ordinal );
+    provider->pFuncs->pCPExportKey = (void *)CRYPT_GetProviderProc( provider->hModule, "CPExportKey", 10, allow_ordinal );
+    provider->pFuncs->pCPGenKey = (void *)CRYPT_GetProviderProc( provider->hModule, "CPGenKey", 11, allow_ordinal );
+    provider->pFuncs->pCPGenRandom = (void *)CRYPT_GetProviderProc( provider->hModule, "CPGenRandom", 12, allow_ordinal );
+    provider->pFuncs->pCPGetHashParam = (void *)CRYPT_GetProviderProc( provider->hModule, "CPGetHashParam", 13, allow_ordinal );
+    provider->pFuncs->pCPGetKeyParam = (void *)CRYPT_GetProviderProc( provider->hModule, "CPGetKeyParam", 14, allow_ordinal );
+    provider->pFuncs->pCPGetProvParam = (void *)CRYPT_GetProviderProc( provider->hModule, "CPGetProvParam", 15, allow_ordinal );
+    provider->pFuncs->pCPGetUserKey = (void *)CRYPT_GetProviderProc( provider->hModule, "CPGetUserKey", 16, allow_ordinal );
+    provider->pFuncs->pCPHashData = (void *)CRYPT_GetProviderProc( provider->hModule, "CPHashData", 17, allow_ordinal );
+    provider->pFuncs->pCPHashSessionKey = (void *)CRYPT_GetProviderProc( provider->hModule, "CPHashSessionKey", 18, allow_ordinal );
+    provider->pFuncs->pCPImportKey = (void *)CRYPT_GetProviderProc( provider->hModule, "CPImportKey", 19, allow_ordinal );
+    provider->pFuncs->pCPReleaseContext = (void *)CRYPT_GetProviderProc( provider->hModule, "CPReleaseContext", 20, allow_ordinal );
+    provider->pFuncs->pCPSetHashParam = (void *)CRYPT_GetProviderProc( provider->hModule, "CPSetHashParam", 21, allow_ordinal );
+    provider->pFuncs->pCPSetKeyParam = (void *)CRYPT_GetProviderProc( provider->hModule, "CPSetKeyParam", 22, allow_ordinal );
+    provider->pFuncs->pCPSetProvParam = (void *)CRYPT_GetProviderProc( provider->hModule, "CPSetProvParam", 23, allow_ordinal );
+    provider->pFuncs->pCPSignHash = (void *)CRYPT_GetProviderProc( provider->hModule, "CPSignHash", 24, allow_ordinal );
+    provider->pFuncs->pCPVerifySignature = (void *)CRYPT_GetProviderProc( provider->hModule, "CPVerifySignature", 25, allow_ordinal );
+
+    if (!provider->pFuncs->pCPAcquireContext ||
+        !provider->pFuncs->pCPCreateHash ||
+        !provider->pFuncs->pCPDecrypt ||
+        !provider->pFuncs->pCPDeriveKey ||
+        !provider->pFuncs->pCPDestroyHash ||
+        !provider->pFuncs->pCPDestroyKey ||
+        !provider->pFuncs->pCPEncrypt ||
+        !provider->pFuncs->pCPExportKey ||
+        !provider->pFuncs->pCPGenKey ||
+        !provider->pFuncs->pCPGenRandom ||
+        !provider->pFuncs->pCPGetHashParam ||
+        !provider->pFuncs->pCPGetKeyParam ||
+        !provider->pFuncs->pCPGetProvParam ||
+        !provider->pFuncs->pCPGetUserKey ||
+        !provider->pFuncs->pCPHashData ||
+        !provider->pFuncs->pCPHashSessionKey ||
+        !provider->pFuncs->pCPImportKey ||
+        !provider->pFuncs->pCPReleaseContext ||
+        !provider->pFuncs->pCPSetHashParam ||
+        !provider->pFuncs->pCPSetKeyParam ||
+        !provider->pFuncs->pCPSetProvParam ||
+        !provider->pFuncs->pCPSignHash ||
+        !provider->pFuncs->pCPVerifySignature)
+        goto error;
 
 	/* FIXME: Not sure what the pbContextInfo field is for.
 	 *        Does it need memory allocation?

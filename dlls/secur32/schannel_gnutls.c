@@ -1462,6 +1462,30 @@ static void gnutls_log(int level, const char *msg)
     TRACE("<%d> %s", level, msg);
 }
 
+static void *load_libgnutls(void)
+{
+#ifdef __APPLE__
+    static const char * const paths[] =
+    {
+        SONAME_LIBGNUTLS,
+        "/usr/local/lib/" SONAME_LIBGNUTLS,
+        "/usr/local/opt/gnutls/lib/" SONAME_LIBGNUTLS,
+        "/opt/homebrew/lib/" SONAME_LIBGNUTLS,
+        "/opt/homebrew/opt/gnutls/lib/" SONAME_LIBGNUTLS,
+    };
+    size_t i;
+
+    for (i = 0; i < sizeof(paths) / sizeof(paths[0]); ++i)
+    {
+        void *handle = dlopen( paths[i], RTLD_NOW );
+        if (handle) return handle;
+    }
+    return NULL;
+#else
+    return dlopen( SONAME_LIBGNUTLS, RTLD_NOW );
+#endif
+}
+
 static NTSTATUS process_attach( void *args )
 {
     int ret;
@@ -1476,7 +1500,7 @@ static NTSTATUS process_attach( void *args )
         setenv("GNUTLS_SYSTEM_PRIORITY_FILE", "/dev/null", 0);
     }
 
-    libgnutls_handle = dlopen(SONAME_LIBGNUTLS, RTLD_NOW);
+    libgnutls_handle = load_libgnutls();
     if (!libgnutls_handle)
     {
         ERR_(winediag)("Failed to load libgnutls, secure connections will not be available.\n");
