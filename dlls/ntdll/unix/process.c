@@ -1185,7 +1185,14 @@ NTSTATUS WINAPI NtTerminateProcess( HANDLE handle, LONG exit_code )
     if (ignore_deadc0de_enabled == -1)
     {
         const char *env = getenv( "ASTROWINE_IGNORE_DEADC0DE" );
-        ignore_deadc0de_enabled = (env && env[0] && strcmp(env, "0")) ? 1 : 0;
+        if (env && env[0]) ignore_deadc0de_enabled = (strcmp(env, "0") != 0);
+        else
+        {
+            /* Default to safe behavior whenever Rosetta hook mode is active,
+             * so callers don't need an extra env toggle. */
+            const char *hooks = getenv( "ASTROWINE_ROSETTA_HOOKS_PATH" );
+            ignore_deadc0de_enabled = (hooks && hooks[0] && strcmp(hooks, "0")) ? 1 : 0;
+        }
     }
 
     if (trace_terminate_enabled)
@@ -1209,8 +1216,10 @@ NTSTATUS WINAPI NtTerminateProcess( HANDLE handle, LONG exit_code )
     if (ignore_deadc0de_enabled && (ULONG)exit_code == 0xdeadc0deu &&
         (handle == GetCurrentProcess() || !handle || handle == (HANDLE)-1))
     {
-        WARN( "Ignoring self NtTerminateProcess(0xDEADC0DE) due to ASTROWINE_IGNORE_DEADC0DE.\n" );
-        return STATUS_SUCCESS;
+        /* Anti-cheat paths often expect this call to be non-returning.
+         * Terminate only the current thread to keep the process alive. */
+        WARN( "Converting self NtTerminateProcess(0xDEADC0DE) to abort_thread() in AstroWine hook mode.\n" );
+        abort_thread( exit_code );
     }
 
     if (handle == GetCurrentProcess())

@@ -4560,6 +4560,33 @@ BOOLEAN WINAPI RtlDllShutdownInProgress(void)
 /****************************************************************************
  *              LdrResolveDelayLoadedAPI   (NTDLL.@)
  */
+static NTSTATUS ldr_load_delay_module( const char *name, HMODULE *module )
+{
+    UNICODE_STRING mod;
+    WINE_MODREF *wm = NULL;
+    NTSTATUS status;
+
+    if (!RtlCreateUnicodeStringFromAsciiz( &mod, name )) return STATUS_NO_MEMORY;
+
+    RtlEnterCriticalSection( &loader_section );
+
+    status = load_dll( NULL, mod.Buffer, 0, &wm, FALSE );
+    if (status == STATUS_SUCCESS && !(wm->ldr.Flags & LDR_DONT_RESOLVE_REFS))
+    {
+        status = process_attach( wm->ldr.DdagNode, NULL );
+        if (status != STATUS_SUCCESS)
+        {
+            LdrUnloadDll( wm->ldr.DllBase );
+            wm = NULL;
+        }
+    }
+    if (status == STATUS_SUCCESS && wm) *module = wm->ldr.DllBase;
+
+    RtlLeaveCriticalSection( &loader_section );
+    RtlFreeUnicodeString( &mod );
+    return status;
+}
+
 void* WINAPI LdrResolveDelayLoadedAPI( void* base, const IMAGE_DELAYLOAD_DESCRIPTOR* desc,
                                        PDELAYLOAD_FAILURE_DLL_CALLBACK dllhook,
                                        PDELAYLOAD_FAILURE_SYSTEM_ROUTINE syshook,
@@ -4567,14 +4594,11 @@ void* WINAPI LdrResolveDelayLoadedAPI( void* base, const IMAGE_DELAYLOAD_DESCRIP
 {
     IMAGE_THUNK_DATA *pIAT, *pINT;
     DELAYLOAD_INFO delayinfo;
-    UNICODE_STRING mod;
     const CHAR* name;
     HMODULE *phmod;
     NTSTATUS nts;
     FARPROC fp;
     INT_PTR id;
-
-    TRACE( "(%p, %p, %p, %p, %p, 0x%08lx)\n", base, desc, dllhook, syshook, addr, flags );
 
     phmod = get_rva(base, desc->ModuleHandleRVA);
     pIAT = get_rva(base, desc->ImportAddressTableRVA);
@@ -4582,15 +4606,13 @@ void* WINAPI LdrResolveDelayLoadedAPI( void* base, const IMAGE_DELAYLOAD_DESCRIP
     name = get_rva(base, desc->DllNameRVA);
     id = addr - pIAT;
 
+    TRACE( "(%p, %p, %p, %p, %p, 0x%08lx) name %s phmod %p mod %p iat %p int %p id %Id\n",
+           base, desc, dllhook, syshook, addr, flags, debugstr_a(name),
+           phmod, phmod ? *phmod : NULL, pIAT, pINT, id );
+
     if (!*phmod)
     {
-        if (!RtlCreateUnicodeStringFromAsciiz(&mod, name))
-        {
-            nts = STATUS_NO_MEMORY;
-            goto fail;
-        }
-        nts = LdrLoadDll(NULL, 0, &mod, phmod);
-        RtlFreeUnicodeString(&mod);
+        nts = ldr_load_delay_module( name, phmod );
         if (nts) goto fail;
     }
 
@@ -4603,6 +4625,28 @@ void* WINAPI LdrResolveDelayLoadedAPI( void* base, const IMAGE_DELAYLOAD_DESCRIP
 
         RtlInitAnsiString(&fnc, (char*)iibn->Name);
         nts = LdrGetProcedureAddress(*phmod, &fnc, 0, (void**)&fp);
+    }
+
+    /* Some delay descriptors can carry a stale module handle. Reload and retry once. */
+    if (nts && *phmod)
+    {
+        TRACE( "delay import retry for %s module %p status %#lx\n",
+               debugstr_a(name), *phmod, nts );
+        *phmod = NULL;
+        nts = ldr_load_delay_module( name, phmod );
+        if (!nts)
+        {
+            if (IMAGE_SNAP_BY_ORDINAL(pINT[id].u1.Ordinal))
+                nts = LdrGetProcedureAddress(*phmod, NULL, LOWORD(pINT[id].u1.Ordinal), (void**)&fp);
+            else
+            {
+                const IMAGE_IMPORT_BY_NAME* iibn = get_rva(base, pINT[id].u1.AddressOfData);
+                ANSI_STRING fnc;
+
+                RtlInitAnsiString(&fnc, (char*)iibn->Name);
+                nts = LdrGetProcedureAddress(*phmod, &fnc, 0, (void**)&fp);
+            }
+        }
     }
     if (!nts)
     {

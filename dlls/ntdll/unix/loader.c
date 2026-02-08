@@ -32,6 +32,7 @@
 #include <signal.h>
 #include <spawn.h>
 #include <string.h>
+#include <strings.h>
 #include <stdlib.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -584,12 +585,46 @@ static const char *rosetta_hook_path( void )
     return (path && *path) ? path : NULL;
 }
 
+static int env_flag_enabled( const char *name )
+{
+    const char *value = getenv( name );
+
+    if (!value || !*value) return 0;
+    if (!strcmp( value, "0" )) return 0;
+    if (!strcasecmp( value, "false" )) return 0;
+    if (!strcasecmp( value, "off" )) return 0;
+    if (!strcasecmp( value, "no" )) return 0;
+    return 1;
+}
+
+static int should_use_rosetta_hook_target( const char *target )
+{
+    static const char *const system_targets[] =
+    {
+        "C:\\windows\\system32\\",
+        "C:\\windows\\syswow64\\",
+        "\\??\\C:\\windows\\system32\\",
+        "\\??\\C:\\windows\\syswow64\\",
+    };
+    unsigned int i;
+
+    if (!target || !*target) return 1;
+    if (env_flag_enabled( "ASTROWINE_ROSETTA_HOOK_SYSTEM" )) return 1;
+
+    for (i = 0; i < ARRAY_SIZE(system_targets); ++i)
+    {
+        size_t len = strlen( system_targets[i] );
+        if (!strncasecmp( target, system_targets[i], len )) return 0;
+    }
+    return 1;
+}
+
 static void preloader_exec( char **argv )
 {
     const char *path;
     /* Prefer rosettax87 hook when configured. */
     path = rosetta_hook_path();
-    if (path)
+    if (path && should_use_rosetta_hook_target( argv[2] ))
     {
         argv[0] = strdup( path );
         execv( argv[0], argv );
@@ -2778,7 +2813,7 @@ DECLSPEC_EXPORT void __wine_main( int argc, char *argv[] )
     {
         check_command_line( argc, argv );
         int do_exec = pre_exec();
-        if (!do_exec && rosetta_hook_path()) do_exec = 1;
+        if (!do_exec && rosetta_hook_path() && should_use_rosetta_hook_target( argv[1] )) do_exec = 1;
         if (do_exec)
         {
             static char noexec[] = "WINELOADERNOEXEC=1";

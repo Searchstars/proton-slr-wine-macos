@@ -1034,7 +1034,42 @@ void WINAPI RtlRbRemoveNode( RTL_RB_TREE *tree, RTL_BALANCED_NODE *node )
 void WINAPI RtlInitializeGenericTableAvl(PRTL_AVL_TABLE table, PRTL_AVL_COMPARE_ROUTINE compare,
                                          PRTL_AVL_ALLOCATE_ROUTINE allocate, PRTL_AVL_FREE_ROUTINE free, void *context)
 {
-    FIXME("%p %p %p %p %p: stub\n", table, compare, allocate, free, context);
+    TRACE("(%p, %p, %p, %p, %p)\n", table, compare, allocate, free, context);
+
+    memset( &table->BalancedRoot, 0, sizeof(table->BalancedRoot) );
+    table->OrderedPointer = NULL;
+    table->WhichOrderedElement = 0;
+    table->NumberGenericTableElements = 0;
+    table->DepthOfTree = 0;
+    table->RestartKey = NULL;
+    table->DeleteCount = 0;
+    table->CompareRoutine = compare;
+    table->AllocateRoutine = allocate;
+    table->FreeRoutine = free;
+    table->TableContext = context;
+}
+
+static RTL_BALANCED_LINKS *rtl_avl_get_leftmost( RTL_BALANCED_LINKS *node )
+{
+    if (!node) return NULL;
+    while (node->LeftChild) node = node->LeftChild;
+    return node;
+}
+
+static RTL_BALANCED_LINKS *rtl_avl_get_next( RTL_BALANCED_LINKS *node )
+{
+    RTL_BALANCED_LINKS *parent;
+
+    if (!node) return NULL;
+    if (node->RightChild) return rtl_avl_get_leftmost( node->RightChild );
+
+    parent = node->Parent;
+    while (parent && node == parent->RightChild)
+    {
+        node = parent;
+        parent = parent->Parent;
+    }
+    return parent;
 }
 
 /******************************************************************************
@@ -1042,11 +1077,17 @@ void WINAPI RtlInitializeGenericTableAvl(PRTL_AVL_TABLE table, PRTL_AVL_COMPARE_
  */
 void * WINAPI RtlEnumerateGenericTableWithoutSplayingAvl(RTL_AVL_TABLE *table, PVOID *previous)
 {
-    static int warn_once;
+    RTL_BALANCED_LINKS *node;
 
-    if (!warn_once++)
-        FIXME("(%p, %p) stub!\n", table, previous);
-    return NULL;
+    TRACE("(%p, %p)\n", table, previous);
+
+    if (!previous) return NULL;
+
+    if (!*previous) node = rtl_avl_get_leftmost( table->BalancedRoot.RightChild );
+    else node = rtl_avl_get_next( *previous );
+
+    *previous = node;
+    return node ? node + 1 : NULL;
 }
 
 /******************************************************************************
@@ -1054,16 +1095,56 @@ void * WINAPI RtlEnumerateGenericTableWithoutSplayingAvl(RTL_AVL_TABLE *table, P
  */
 ULONG WINAPI RtlNumberGenericTableElementsAvl(RTL_AVL_TABLE *table)
 {
-    FIXME("(%p) stub!\n", table);
-    return 0;
+    TRACE("(%p)\n", table);
+    return table->NumberGenericTableElements;
 }
 
 /***********************************************************************
  *           RtlInsertElementGenericTableAvl  (NTDLL.@)
  */
-void WINAPI RtlInsertElementGenericTableAvl(PRTL_AVL_TABLE table, void *buffer, ULONG size, BOOL *element)
+void * WINAPI RtlInsertElementGenericTableAvl(PRTL_AVL_TABLE table, void *buffer, ULONG size, BOOL *element)
 {
-    FIXME("%p %p %lu %p: stub\n", table, buffer, size, element);
+    RTL_BALANCED_LINKS *node, *parent = NULL;
+    RTL_GENERIC_COMPARE_RESULTS compare_result = GenericEqual;
+    ULONG depth = 1;
+
+    TRACE("(%p, %p, %lu, %p)\n", table, buffer, size, element);
+
+    for (node = table->BalancedRoot.RightChild; node; depth++)
+    {
+        compare_result = table->CompareRoutine( table, buffer, node + 1 );
+        if (compare_result == GenericEqual)
+        {
+            if (element) *element = FALSE;
+            return node + 1;
+        }
+        parent = node;
+        node = (compare_result == GenericLessThan) ? node->LeftChild : node->RightChild;
+    }
+
+    node = table->AllocateRoutine( table, sizeof(*node) + size );
+    if (!node)
+    {
+        if (element) *element = FALSE;
+        return NULL;
+    }
+
+    memset( node, 0, sizeof(*node) );
+    memcpy( node + 1, buffer, size );
+    node->Parent = parent;
+
+    if (!parent)
+    {
+        table->BalancedRoot.RightChild = node;
+        table->DepthOfTree = 1;
+    }
+    else if (compare_result == GenericLessThan) parent->LeftChild = node;
+    else parent->RightChild = node;
+
+    if (depth > table->DepthOfTree) table->DepthOfTree = depth;
+    table->NumberGenericTableElements++;
+    if (element) *element = TRUE;
+    return node + 1;
 }
 
 /******************************************************************************
@@ -1071,7 +1152,17 @@ void WINAPI RtlInsertElementGenericTableAvl(PRTL_AVL_TABLE table, void *buffer, 
  */
 void * WINAPI RtlLookupElementGenericTableAvl(PRTL_AVL_TABLE table, void *buffer)
 {
-    FIXME("(%p, %p) stub!\n", table, buffer);
+    RTL_BALANCED_LINKS *node;
+    RTL_GENERIC_COMPARE_RESULTS compare_result;
+
+    TRACE("(%p, %p)\n", table, buffer);
+
+    for (node = table->BalancedRoot.RightChild; node; )
+    {
+        compare_result = table->CompareRoutine( table, buffer, node + 1 );
+        if (compare_result == GenericEqual) return node + 1;
+        node = (compare_result == GenericLessThan) ? node->LeftChild : node->RightChild;
+    }
     return NULL;
 }
 
