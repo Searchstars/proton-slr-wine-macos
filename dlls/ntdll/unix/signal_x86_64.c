@@ -2000,6 +2000,84 @@ static inline void set_rax_low( ucontext_t *sigcontext, CONTEXT *context, unsign
 }
 
 /***********************************************************************
+ *           handle_astrowine_cpuid_trap
+ *
+ * On macOS under Rosetta 2, CPUID may report a "VirtualApple ..." brand string.
+ * To override it without touching Rosetta runtime mappings (which proved unstable),
+ * we patch guest CPUID (0f a2) to HLT+NOP (f4 90) at module load time and emulate
+ * the instruction here, overriding only the brand leaves.
+ */
+static BOOL astrowine_cpuid_is_enabled(void)
+{
+    static int cached = -1;
+
+    if (cached == -1)
+    {
+        /* Enabled when set (empty means use default brand). */
+        cached = (getenv( "ASTROWINE_CPUID_BRAND" ) != NULL);
+    }
+    return cached;
+}
+
+static void astrowine_cpuid_get_brand_leaf( UINT leaf, UINT regs[4] )
+{
+    static BOOL initialized;
+    static BYTE brand[48];
+
+    if (!initialized)
+    {
+        const char *env = getenv( "ASTROWINE_CPUID_BRAND" );
+        const char *src = (env && env[0]) ? env : "Apple M4";
+        SIZE_T len = strlen( src );
+
+        if (len > sizeof(brand)) len = sizeof(brand);
+        memset( brand, 0, sizeof(brand) );
+        memcpy( brand, src, len );
+        initialized = TRUE;
+    }
+
+    memcpy( regs, brand + (leaf - 0x80000002u) * 16, 16 );
+}
+
+static inline BOOL handle_astrowine_cpuid_trap( ucontext_t *sigcontext, CONTEXT *context )
+{
+    BYTE instr[2];
+    ULONG64 ip = context->Rip;
+    UINT leaf, subleaf;
+    UINT eax, ebx, ecx, edx;
+
+    if (!astrowine_cpuid_is_enabled()) return FALSE;
+
+    if (virtual_uninterrupted_read_memory( (BYTE *)ip, instr, sizeof(instr) ) < sizeof(instr)) return FALSE;
+    if (instr[0] != 0xf4 || instr[1] != 0x90) return FALSE;  /* HLT; NOP */
+
+    leaf = (UINT)context->Rax;
+    subleaf = (UINT)context->Rcx;
+
+    __asm__ volatile( "cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(leaf), "c"(subleaf) );
+
+    if (leaf >= 0x80000002u && leaf <= 0x80000004u)
+    {
+        UINT regs[4];
+        astrowine_cpuid_get_brand_leaf( leaf, regs );
+        eax = regs[0];
+        ebx = regs[1];
+        ecx = regs[2];
+        edx = regs[3];
+    }
+
+    set_gpr_value( sigcontext, context, 0, (ULONG64)eax ); /* RAX */
+    set_gpr_value( sigcontext, context, 3, (ULONG64)ebx ); /* RBX */
+    set_gpr_value( sigcontext, context, 1, (ULONG64)ecx ); /* RCX */
+    set_gpr_value( sigcontext, context, 2, (ULONG64)edx ); /* RDX */
+
+    RIP_sig(sigcontext) += 2;
+    context->Rip += 2;
+    TRACE_(seh)( "astrowine: emulated CPUID leaf=%#x subleaf=%#x at %p\n", leaf, subleaf, (void *)ip );
+    return TRUE;
+}
+
+/***********************************************************************
  *           fake_control_register
  */
 static inline ULONG64 fake_control_register( unsigned int cr )
@@ -3021,6 +3099,7 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
         /* CW HACK 20186 */
         if (handle_multibyte_nop( ucontext, &context.c )) return;
         if (handle_cet_nop( ucontext, &context.c )) return;
+        if (handle_astrowine_cpuid_trap( ucontext, &context.c )) return;
         if (handle_rosetta_io_port( ucontext, &context.c )) return;
         if (handle_rosetta_mov_cr( ucontext, &context.c )) return;
 #endif
@@ -3037,6 +3116,7 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
         {
             WORD err = ERROR_sig(ucontext);
 #ifdef __APPLE__
+            if (handle_astrowine_cpuid_trap( ucontext, &context.c )) return;
             if (handle_rosetta_io_port( ucontext, &context.c )) return;
             if (handle_rosetta_mov_cr( ucontext, &context.c )) return;
 #endif

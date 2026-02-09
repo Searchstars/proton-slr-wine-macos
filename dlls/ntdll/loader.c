@@ -2281,6 +2281,169 @@ static void apply_binary_patches( WINE_MODREF* wm );
 
 #endif
 
+#if defined(__x86_64__)
+static BOOL astrowine_cpuid_patch_is_enabled(void)
+{
+    static int cached = -1;
+
+    if (cached == -1)
+    {
+        static const WCHAR varW[] = L"ASTROWINE_CPUID_BRAND";
+        UNICODE_STRING name, value;
+        WCHAR dummy[2];
+        NTSTATUS status;
+
+        name.Buffer = (WCHAR *)varW;
+        name.Length = wcslen( varW ) * sizeof(WCHAR);
+        name.MaximumLength = name.Length + sizeof(WCHAR);
+
+        value.Buffer = dummy;
+        value.Length = 0;
+        value.MaximumLength = sizeof(dummy);
+
+        status = RtlQueryEnvironmentVariable_U( NULL, &name, &value );
+        cached = (status == STATUS_SUCCESS || status == STATUS_BUFFER_TOO_SMALL);
+    }
+
+    return cached;
+}
+
+static BOOL astrowine_cpuid_module_is_allowed( const UNICODE_STRING *base_name )
+{
+    static int have_allowlist = -1;
+    static WCHAR allowlist[8192];
+    WCHAR *p, *start, *end;
+    SIZE_T len;
+
+    if (have_allowlist == -1)
+    {
+        static const WCHAR varW[] = L"ASTROWINE_CPUID_PATCH_MODULES";
+        UNICODE_STRING name, value;
+        NTSTATUS status;
+
+        name.Buffer = (WCHAR *)varW;
+        name.Length = wcslen( varW ) * sizeof(WCHAR);
+        name.MaximumLength = name.Length + sizeof(WCHAR);
+
+        value.Buffer = allowlist;
+        value.Length = 0;
+        value.MaximumLength = sizeof(allowlist);
+
+        status = RtlQueryEnvironmentVariable_U( NULL, &name, &value );
+        if (status == STATUS_SUCCESS && value.Length)
+        {
+            allowlist[value.Length / sizeof(WCHAR)] = 0;
+            have_allowlist = 1;
+        }
+        else
+        {
+            allowlist[0] = 0;
+            have_allowlist = 0;
+        }
+    }
+
+    if (!have_allowlist) return TRUE; /* default: patch all modules */
+
+    p = allowlist;
+    while (*p)
+    {
+        while (*p == ' ' || *p == '\t' || *p == ';' || *p == ',') p++;
+        start = p;
+        while (*p && *p != ';' && *p != ',' ) p++;
+        end = p;
+        while (end > start && (end[-1] == ' ' || end[-1] == '\t')) end--;
+
+        len = end - start;
+        if (len)
+        {
+            if (!RtlCompareUnicodeStrings( start, len, base_name->Buffer, base_name->Length / sizeof(WCHAR), TRUE ))
+                return TRUE;
+        }
+
+        if (*p) p++; /* skip separator */
+    }
+
+    return FALSE;
+}
+
+static BOOL astrowine_section_is_text( const IMAGE_SECTION_HEADER *sec )
+{
+    /* Section name is 8 bytes and not necessarily NUL-terminated. */
+    static const char prefix[] = ".text";
+    unsigned int i;
+
+    for (i = 0; i < sizeof(prefix) - 1; i++)
+    {
+        char a = (char)sec->Name[i];
+        char b = prefix[i];
+
+        if (a >= 'A' && a <= 'Z') a += 'a' - 'A';
+        if (b >= 'A' && b <= 'Z') b += 'a' - 'A';
+        if (a != b) return FALSE;
+    }
+    return TRUE;
+}
+
+static SIZE_T astrowine_patch_cpuid_in_range( BYTE *addr, SIZE_T size )
+{
+    SIZE_T count = 0;
+    SIZE_T i;
+
+    for (i = 0; i + 1 < size; i++)
+    {
+        if (addr[i] == 0x0f && addr[i + 1] == 0xa2) /* CPUID */
+        {
+            addr[i] = 0xf4;     /* HLT */
+            addr[i + 1] = 0x90; /* NOP */
+            count++;
+            i++; /* skip the second byte */
+        }
+    }
+    return count;
+}
+
+static void astrowine_patch_cpuid_in_module( const UNICODE_STRING *nt_name, const UNICODE_STRING *base_name,
+                                             void *module, IMAGE_NT_HEADERS *nt )
+{
+    IMAGE_SECTION_HEADER *sec;
+    SIZE_T total = 0;
+    unsigned int i;
+
+    if (!astrowine_cpuid_patch_is_enabled()) return;
+    if (!astrowine_cpuid_module_is_allowed( base_name )) return;
+
+    sec = IMAGE_FIRST_SECTION( nt );
+    for (i = 0; i < nt->FileHeader.NumberOfSections; i++)
+    {
+        SIZE_T size = max( sec[i].Misc.VirtualSize, sec[i].SizeOfRawData );
+        DWORD va = sec[i].VirtualAddress;
+        void *protect_addr;
+        SIZE_T protect_size;
+        ULONG old_prot;
+
+        if (!(sec[i].Characteristics & IMAGE_SCN_MEM_EXECUTE)) continue;
+        if (!astrowine_section_is_text( &sec[i] )) continue;
+        if (!size) continue;
+        if (va >= nt->OptionalHeader.SizeOfImage) continue;
+        if (va + size > nt->OptionalHeader.SizeOfImage) size = nt->OptionalHeader.SizeOfImage - va;
+
+        protect_addr = (BYTE *)module + va;
+        protect_size = size;
+
+        /* Drop execute while patching; re-enabling execute also nudges Rosetta to re-translate. */
+        if (NtProtectVirtualMemory( NtCurrentProcess(), &protect_addr, &protect_size, PAGE_READWRITE, &old_prot ))
+            continue;
+
+        total += astrowine_patch_cpuid_in_range( (BYTE *)module + va, size );
+
+        NtProtectVirtualMemory( NtCurrentProcess(), &protect_addr, &protect_size, old_prot, &old_prot );
+    }
+
+    if (total)
+        TRACE_(module)( "astrowine: patched %Iu CPUID instruction(s) in %s\n", total, debugstr_us( nt_name ) );
+}
+#endif
+
 static int use_lsteamclient(void)
 {
     WCHAR env[32];
@@ -2436,6 +2599,10 @@ static NTSTATUS build_module( LPCWSTR load_path, const UNICODE_STRING *nt_name, 
     {
         apply_binary_patches( wm );
     }
+#endif
+
+#if defined(__x86_64__)
+    astrowine_patch_cpuid_in_module( nt_name, &wm->ldr.BaseDllName, wm->ldr.DllBase, nt );
 #endif
 
     wm->ldr.LoadCount = 1;
