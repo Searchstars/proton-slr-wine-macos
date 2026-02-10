@@ -87,7 +87,7 @@ static BOOL is_rosetta2(void)
     char buffer[64];
     NTSTATUS status = NtQuerySystemInformation( SystemProcessorBrandString, buffer, sizeof(buffer), NULL );
 
-    if (status || !strstr( buffer, "VirtualApple" ))
+    if (status || !strstr( buffer, "Apple" ))
         return FALSE;
 
     return TRUE;

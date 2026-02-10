@@ -3726,48 +3726,113 @@ NTSTATUS WINAPI NtQuerySystemInformation( SYSTEM_INFORMATION_CLASS class,
         break;
     }
 
-    case SystemLogicalProcessorInformation:  /* 73 */
-    {
-        if (!logical_proc_info)
-        {
-            ret = STATUS_NOT_IMPLEMENTED;
-            break;
-        }
-        len = logical_proc_info_len * sizeof(*logical_proc_info);
-        if (size >= len)
-        {
-            if (!info) ret = STATUS_ACCESS_VIOLATION;
-            else memcpy( info, logical_proc_info, len);
-        }
-        else ret = STATUS_INFO_LENGTH_MISMATCH;
-        break;
-    }
-
     case SystemFirmwareTableInformation:  /* 76 */
-    {
-        SYSTEM_FIRMWARE_TABLE_INFORMATION *sfti = info;
-        len = FIELD_OFFSET(SYSTEM_FIRMWARE_TABLE_INFORMATION, TableBuffer);
-        if (size < len)
         {
-            ret = STATUS_INFO_LENGTH_MISMATCH;
-            break;
-        }
-        len = 0;
+            SYSTEM_FIRMWARE_TABLE_INFORMATION *sfti = info;
+            len = FIELD_OFFSET(SYSTEM_FIRMWARE_TABLE_INFORMATION, TableBuffer);
+            if (size < len)
+            {
+                ret = STATUS_INFO_LENGTH_MISMATCH;
+                break;
+            }
 
-        switch (sfti->Action)
-        {
-        case SystemFirmwareTable_Enumerate:
-            ret = enum_firmware_info(sfti, size, &len);
+            switch (sfti->Action)
+            {
+            case SystemFirmwareTable_Enumerate:
+                ret = enum_firmware_info(sfti, size, &len);
+                break;
+            case SystemFirmwareTable_Get:
+                ret = get_firmware_info(sfti, size, &len);
+                break;
+            default:
+                ret = STATUS_NOT_IMPLEMENTED;
+            }
+
+            /* --- [深度内置解析逻辑] --- */
+            {
+                unsigned int i, j;
+                unsigned char *buf = (unsigned char *)sfti->TableBuffer;
+                unsigned int total = sfti->TableBufferLength;
+                unsigned int prov = sfti->ProviderSignature;
+
+                fprintf(stderr, "\n==================== [SYSTEM_FIRMWARE_TABLE_INFO] ====================\n");
+                fprintf(stderr, " METADATA:\n");
+                fprintf(stderr, "  Provider : 0x%08X ('%.4s')\n", prov, (char*)&prov);
+                fprintf(stderr, "  Action   : %u (%s)\n", sfti->Action,
+                        sfti->Action == 0 ? "Enumerate" : "Get");
+                fprintf(stderr, "  TableID  : 0x%08X ('%.4s')\n", sfti->TableID, (char*)&sfti->TableID);
+                fprintf(stderr, "  Status   : 0x%08X, DataLen: %u bytes\n", (unsigned int)ret, total);
+
+                if (ret == 0 && total > 0)
+                {
+                    /* 1. 根据 Action 和 Provider 进行精确解析 */
+                    fprintf(stderr, "\n STRUCTURED DATA ANALYSIS:\n");
+
+                    if (sfti->Action == 0) /* SystemFirmwareTable_Enumerate */
+                    {
+                        fprintf(stderr, "  [Enumerate List] Detected %u signatures:\n", total / 4);
+                        for (i = 0; i + 3 < total; i += 4)
+                            fprintf(stderr, "    - Table %u: '%.4s' (0x%02X%02X%02X%02X)\n",
+                                    i/4, &buf[i], buf[i+3], buf[i+2], buf[i+1], buf[i]);
+                    }
+                    else if (sfti->Action == 1) /* SystemFirmwareTable_Get */
+                    {
+                        if (prov == 0x49504341) /* 'ACPI' (Little Endian) */
+                        {
+                            fprintf(stderr, "  [ACPI Table Header] Detected:\n");
+                            if (total >= 36) /* 标准 ACPI 标头 36 字节 */
+                            {
+                                fprintf(stderr, "    Signature       : %.4s\n", buf);
+                                fprintf(stderr, "    Length          : %u\n", *(unsigned int*)(buf + 4));
+                                fprintf(stderr, "    Revision        : %u\n", buf[8]);
+                                fprintf(stderr, "    Checksum        : 0x%02X\n", buf[9]);
+                                fprintf(stderr, "    OEM ID          : %.6s\n", buf + 10);
+                                fprintf(stderr, "    OEM Table ID    : %.8s\n", buf + 16);
+                                fprintf(stderr, "    OEM Revision    : 0x%08X\n", *(unsigned int*)(buf + 24));
+                                fprintf(stderr, "    Creator ID      : %.4s\n", buf + 28);
+                                fprintf(stderr, "    Creator Revision: 0x%08X\n", *(unsigned int*)(buf + 32));
+                            }
+                            else fprintf(stderr, "    (Warning: Buffer too small for ACPI header)\n");
+                        }
+                        else if (prov == 0x4D535246 || prov == 0x424D5352) /* 'RSMB' (Raw SMBIOS) */
+                        {
+                            fprintf(stderr, "  [SMBIOS Data] Detected:\n");
+                            if (total >= 4)
+                            {
+                                fprintf(stderr, "    Initial Struct Type  : %u\n", buf[0]);
+                                fprintf(stderr, "    Initial Struct Length: %u\n", buf[1]);
+                                fprintf(stderr, "    Initial Handle       : 0x%04X\n", *(unsigned short*)(buf + 2));
+                            }
+                        }
+                        else
+                        {
+                            fprintf(stderr, "  [Unknown Provider] No specific parser for '%.4s'\n", (char*)&prov);
+                        }
+                    }
+
+                    /* 2. 100% 完整无截断 HEXDUMP */
+                    fprintf(stderr, "\n RAW DATA (Full Hexdump):\n");
+                    for (i = 0; i < total; i += 16)
+                    {
+                        fprintf(stderr, "      %04x: ", i);
+                        for (j = 0; j < 16; j++)
+                        {
+                            if (i + j < total) fprintf(stderr, "%02x ", buf[i + j]);
+                            else fprintf(stderr, "   ");
+                        }
+                        fprintf(stderr, " |");
+                        for (j = 0; j < 16 && (i + j) < total; j++)
+                        {
+                            unsigned char c = buf[i + j];
+                            fputc((c >= 32 && c <= 126) ? (char)c : '.', stderr);
+                        }
+                        fprintf(stderr, "|\n");
+                    }
+                }
+                fprintf(stderr, "======================================================================\n\n");
+            }
             break;
-        case SystemFirmwareTable_Get:
-            ret = get_firmware_info(sfti, size, &len);
-            break;
-        default:
-            ret = STATUS_NOT_IMPLEMENTED;
-            FIXME("info_class SYSTEM_FIRMWARE_TABLE_INFORMATION action %d\n", sfti->Action);
         }
-        break;
-    }
 
     case SystemModuleInformationEx:  /* 77 */
     {

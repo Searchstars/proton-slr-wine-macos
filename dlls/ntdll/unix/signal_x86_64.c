@@ -1523,6 +1523,18 @@ static void setup_raise_exception( ucontext_t *sigcontext, EXCEPTION_RECORD *rec
             NtGetContextThread(GetCurrentThread(), context);
             context->ContextFlags |= saved_flags;  /* restore flags */
         }
+
+        TRACE_(seh)("ASTROWINE: SRE EFlags=%llx Dr7=%llx\n", context->EFlags, context->Dr7);
+
+        if ((context->EFlags & 0x100) || (context->EFlags == 0x246))
+        {
+            context->Dr6 = 0xFFFF4FF1;
+            context->Dr7 |= 0x1;
+
+            TRACE_(seh)("ASTROWINE: !!! PATCH EXECUTED !!! Dr6 set to %llx, Dr7 to %llx\n", context->Dr6, context->Dr7);
+        }
+
+
         context->EFlags &= ~0x100;  /* clear single-step flag */
     }
 

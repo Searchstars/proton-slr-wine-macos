@@ -7172,12 +7172,14 @@ NTSTATUS WINAPI NtReadVirtualMemory( HANDLE process, const void *addr, void *buf
     }
 done:
 #else
+    /*
     if (!virtual_check_buffer_for_write( buffer, size ))
     {
         status = STATUS_ACCESS_VIOLATION;
         size = 0;
     }
-    else if (process == GetCurrentProcess())
+    */
+    /*else*/ if (process == GetCurrentProcess())
     {
         __TRY
         {
