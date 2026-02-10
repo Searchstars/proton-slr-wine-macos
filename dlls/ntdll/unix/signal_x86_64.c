@@ -2643,6 +2643,14 @@ static void check_bpf_jit_enable(void)
 static void install_bpf(struct sigaction *sig_act)
 {
 #ifdef HAVE_SECCOMP
+    /* Allow disabling seccomp for games with invasive anti-cheat that detect SIGSYS as VM */
+    const char *disable_seccomp = getenv("WINE_DISABLE_SECCOMP");
+    if (disable_seccomp && disable_seccomp[0] && strcmp(disable_seccomp, "0"))
+    {
+        WARN_(seh)("Seccomp disabled via WINE_DISABLE_SECCOMP environment variable.\n");
+        return;
+    }
+
 #   ifndef SECCOMP_FILTER_FLAG_SPEC_ALLOW
 #       define SECCOMP_FILTER_FLAG_SPEC_ALLOW (1UL << 2)
 #   endif

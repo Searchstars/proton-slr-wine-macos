@@ -1578,7 +1578,7 @@ static UINT16 get_bios_smbiosminorversion( const char *buf, UINT len )
 static WCHAR *get_bios_manufacturer( const char *buf, UINT len )
 {
     WCHAR *ret = get_smbios_string( SMBIOS_TYPE_BIOS, 0, offsetof(struct smbios_bios, vendor), buf, len );
-    if (!ret) return wcsdup( L"The Wine Project" );
+    if (!ret) return wcsdup( L"Microsoft Corporation" );
     return ret;
 }
 
@@ -1624,7 +1624,7 @@ static WCHAR *get_bios_releasedate( const char *buf, UINT len )
 static WCHAR *get_bios_smbiosbiosversion( const char *buf, UINT len )
 {
     WCHAR *ret = get_smbios_string( SMBIOS_TYPE_BIOS, 0, offsetof(struct smbios_bios, version), buf, len );
-    if (!ret) return wcsdup( L"Wine" );
+    if (!ret) return wcsdup( L"109.3748.768" );
     return ret;
 }
 
@@ -1739,7 +1739,7 @@ static enum fill_status fill_cdromdrive( struct table *table, const struct expr 
             swprintf( drive, ARRAY_SIZE( drive ), L"%c:", 'A' + i );
             rec->drive        = wcsdup( drive );
             rec->mediatype    = L"CR-ROM";
-            rec->name         = L"Wine CD_ROM ATA Device";
+            rec->name         = L"CD-ROM ATA Device";
             rec->pnpdevice_id = L"IDE\\CDROMWINE_CD-ROM_____________________________1.0_____\\5&3A2A5854&0&1.0.0";
             if (!match_row( table, row, cond, &status ))
             {
@@ -1860,14 +1860,14 @@ static WCHAR *get_username(void)
 static WCHAR *get_compsysproduct_name( const char *buf, UINT len )
 {
     WCHAR *ret = get_smbios_string( SMBIOS_TYPE_SYSTEM, 0, offsetof(struct smbios_system, product), buf, len );
-    if (!ret) return wcsdup( L"Wine" );
+    if (!ret) return wcsdup( L"Surface Pro 4" );
     return ret;
 }
 
 static WCHAR *get_compsysproduct_vendor( const char *buf, UINT len )
 {
     WCHAR *ret = get_smbios_string( SMBIOS_TYPE_SYSTEM, 0, offsetof(struct smbios_system, vendor), buf, len );
-    if (!ret) return wcsdup( L"The Wine Project" );
+    if (!ret) return wcsdup( L"Microsoft Corporation" );
     return ret;
 }
 
@@ -2552,14 +2552,14 @@ static enum fill_status fill_diskdrive( struct table *table, const struct expr *
             if (!resize_table( table, row + 1, sizeof(*rec) )) return FILL_STATUS_FAILED;
 
             rec = (struct record_diskdrive *)(table->data + offset);
-            rec->caption       = L"Wine Disk Drive";
+            rec->caption       = L"Samsung SSD";
             swprintf( device_id, ARRAY_SIZE( device_id ), fmtW, index );
             rec->device_id     = wcsdup( device_id );
             rec->index         = index++;
             rec->interfacetype = L"IDE";
             rec->manufacturer  = L"(Standard disk drives)";
             rec->mediatype     = (type == DRIVE_FIXED) ? L"Fixed hard disk" : L"Removable media";
-            rec->model         = L"Wine Disk Drive";
+            rec->model         = L"Samsung SSD";
             rec->pnpdevice_id  = L"IDE\\Disk\\VEN_WINE";
             rec->serialnumber  = get_diskdrive_serialnumber( root[0] );
             get_freespace( root, &size );
@@ -3090,7 +3090,7 @@ static enum fill_status fill_networkadapter( struct table *table, const struct e
         rec->index                = aa->IfIndex;
         rec->interface_index      = aa->IfIndex;
         rec->mac_address          = get_mac_address( aa->PhysicalAddress, aa->PhysicalAddressLength );
-        rec->manufacturer         = L"The Wine Project";
+        rec->manufacturer         = L"Intel";
         rec->name                 = wcsdup( aa->FriendlyName );
         rec->netenabled           = connection_status ? -1 : 0;
         rec->netconnection_status = connection_status;
@@ -3429,11 +3429,11 @@ static enum fill_status fill_pnpentity( struct table *table, const struct expr *
             }
 
             StringFromGUID2( &devinfo.ClassGuid, guid, ARRAY_SIZE(guid) );
-            rec->caption = L"Wine PnP Device";
+            rec->caption = L"PnP Device";
             rec->class_guid = wcsdup( wcslwr(guid) );
             rec->device_id = wcsdup( device_id );
-            rec->manufacturer = L"The Wine Project";
-            rec->name = L"Wine PnP Device";
+            rec->manufacturer = L"Microsoft";
+            rec->name = L"PnP Device";
 
             table->num_rows++;
             if (!match_row( table, table->num_rows - 1, cond, &status ))
@@ -4032,7 +4032,7 @@ static enum fill_status fill_operatingsystem( struct table *table, const struct 
     rec->lastbootuptime         = get_lastbootuptime();
     rec->localdatetime          = get_localdatetime();
     rec->locale                 = get_locale();
-    rec->manufacturer           = L"The Wine Project";
+    rec->manufacturer           = L"Microsoft Corporation";
     rec->name                   = get_osname( rec->caption );
     rec->operatingsystemsku     = get_operatingsystemsku();
     rec->organization           = get_organization();
@@ -4292,7 +4292,7 @@ static enum fill_status fill_sid( struct table *table, const struct expr *cond )
 static WCHAR *get_systemenclosure_manufacturer( const char *buf, UINT len )
 {
     WCHAR *ret = get_smbios_string( SMBIOS_TYPE_CHASSIS, 0, offsetof(struct smbios_chassis, vendor), buf, len );
-    if (!ret) return wcsdup( L"Wine" );
+    if (!ret) return wcsdup( L"Microsoft Corporation" );
     return ret;
 }
 
@@ -4411,7 +4411,7 @@ static const WCHAR *get_videocontroller_installeddriver( UINT vendorid )
     if (vendorid == HW_VENDOR_AMD) return L"aticfx32.dll";
     else if (vendorid == HW_VENDOR_NVIDIA) return L"nvd3dum.dll";
     else if (vendorid == HW_VENDOR_INTEL) return L"igdudim32.dll";
-    return L"wine.dll";
+    return L"igdudim32.dll";
 }
 
 static BOOL get_dxgi_adapter_desc( DXGI_ADAPTER_DESC *desc )
@@ -4563,12 +4563,12 @@ static enum fill_status fill_sounddevice( struct table *table, const struct expr
     get_dxgi_adapter_desc( &desc );
 
     rec = (struct record_sounddevice *)table->data;
-    rec->caption = L"Wine Audio Device";
+    rec->caption = L"Audio Device";
     rec->deviceid = get_sounddevice_pnpdeviceid( &desc );
-    rec->manufacturer = L"The Wine Project";
-    rec->name = L"Wine Audio Device";
+    rec->manufacturer = L"Realtek";
+    rec->name = L"Audio Device";
     rec->pnpdeviceid = get_sounddevice_pnpdeviceid( &desc );
-    rec->productname = L"Wine Audio Device";
+    rec->productname = L"Audio Device";
     rec->status = L"OK";
     rec->statusinfo = 3;
     if (!match_row( table, row, cond, &status )) free_row_values( table, row );
