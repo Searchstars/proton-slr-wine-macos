@@ -8,6 +8,7 @@ SOURCES = \
 	file.c \
 	process.c \
 	registry.c \
+	rtl.c \
 	security.c \
 	sync.c \
 	syscall.c \

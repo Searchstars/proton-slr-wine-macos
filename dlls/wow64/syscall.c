@@ -19,7 +19,6 @@
  */
 
 #include <stdarg.h>
-#include <setjmp.h>
 
 #include "ntstatus.h"
 #define WIN32_NO_STATUS
@@ -30,6 +29,7 @@
 #include "rtlsupportapi.h"
 #include "wine/unixlib.h"
 #include "wine/asm.h"
+#include "wine/exception.h"
 #include "wow64_private.h"
 #include "wine/debug.h"
 
@@ -78,7 +78,7 @@ struct user_callback_frame
     void                      **ret_ptr;
     ULONG                      *ret_len;
     NTSTATUS                    status;
-    jmp_buf                     jmpbuf;
+    __wine_jmp_buf              jmpbuf;
 };
 
 /* stack frame for user APCs */
@@ -364,7 +364,7 @@ __ASM_GLOBAL_FUNC( raise_exception_handler,
                    "1:\tmov w0, #1\n\t"        /* ExceptionContinueSearch */
                    "ldp x29, x30, [sp], #16\n\t"
                    "ret" )
-#else
+#elif defined(__x86_64__)
 __ASM_GLOBAL_FUNC( raise_exception,
                    "sub $0x4d8,%rsp\n\t"       /* sizeof(context) + alignment */
                    ".seh_stackalloc 0x4d8\n\t"
@@ -399,6 +399,16 @@ __ASM_GLOBAL_FUNC( raise_exception_handler,
                    "leaq raise_exception_ret(%rip),%rdx\n\t"
                    "call RtlUnwind\n\t"
                    "int3" )
+#else
+void WINAPI raise_exception( EXCEPTION_RECORD32 *rec32, void *ctx32,
+                             BOOL first_chance, EXCEPTION_RECORD *rec )
+{
+    CONTEXT context;
+
+    RtlCaptureContext( &context );
+    NtRaiseException( rec, &context, first_chance );
+    call_user_exception_dispatcher( rec32, ctx32, &context );
+}
 #endif
 
 
@@ -473,7 +483,7 @@ NTSTATUS WINAPI wow64_NtCallbackReturn( UINT *args )
     *frame->ret_ptr = ret_ptr;
     *frame->ret_len = ret_len;
     frame->status = status;
-    longjmp( frame->jmpbuf, 1 );
+    __wine_longjmp( &frame->jmpbuf, 1 );
     return STATUS_SUCCESS;
 }
 
@@ -985,7 +995,7 @@ __ASM_GLOBAL_FUNC( wow64_syscall_handler,
                    "1:\tmov w0, #1\n\t"            /* ExceptionContinueSearch */
                    "ldp x29, x30, [sp], #16\n\t"
                    "ret" )
-#else
+#elif defined(__x86_64__)
 NTSTATUS wow64_syscall( UINT *args, ULONG_PTR thunk );
 __ASM_GLOBAL_FUNC( wow64_syscall,
                    "subq $0x28, %rsp\n\t"
@@ -1011,6 +1021,14 @@ __ASM_GLOBAL_FUNC( wow64_syscall_handler,
                    "leaq wow64_syscall_ret(%rip),%rdx\n\t"
                    "call RtlUnwind\n\t"
                    "int3" )
+#else
+NTSTATUS wow64_syscall( UINT *args, ULONG_PTR thunk )
+{
+    NTSTATUS status = ((syscall_thunk)(ULONG_PTR)thunk)( args );
+
+    if (status == STATUS_INVALID_HANDLE) call_raise_user_exception_dispatcher( status );
+    return status;
+}
 #endif
 
 
@@ -1071,7 +1089,7 @@ __ASM_GLOBAL_FUNC( cpu_simulate_handler,
                    "ldp x19, x20, [sp, #16]\n\t"
                    "ldp x29, x30, [sp], #48\n\t"
                    "ret" )
-#else
+#elif defined(__x86_64__)
 extern void DECLSPEC_NORETURN cpu_simulate(void);
 __ASM_GLOBAL_FUNC( cpu_simulate,
                    "subq $0x28, %rsp\n\t"
@@ -1096,6 +1114,13 @@ __ASM_GLOBAL_FUNC( cpu_simulate_handler,
                    "movq %rsi,%r8\n\t"          /* record */
                    "call RtlUnwind\n\t"
                    "int3" )
+#else
+extern void DECLSPEC_NORETURN cpu_simulate(void);
+void DECLSPEC_NORETURN cpu_simulate(void)
+{
+    for (;;)
+        pBTCpuSimulate();
+}
 #endif
 
 
@@ -1257,7 +1282,7 @@ NTSTATUS WINAPI Wow64KiUserCallbackDispatcher( ULONG id, void *args, ULONG len,
             ctx.Eip = pLdrSystemDllInitBlock->pKiUserCallbackDispatcher;
             pBTCpuSetContext( GetCurrentThread(), GetCurrentProcess(), NULL, &ctx );
 
-            if (!setjmp( frame.jmpbuf ))
+            if (!__wine_setjmpex( &frame.jmpbuf, NULL ))
                 cpu_simulate();
             else
                 pBTCpuSetContext( GetCurrentThread(), GetCurrentProcess(), NULL, &orig_ctx );
@@ -1282,7 +1307,7 @@ NTSTATUS WINAPI Wow64KiUserCallbackDispatcher( ULONG id, void *args, ULONG len,
             ctx.Pc = pLdrSystemDllInitBlock->pKiUserCallbackDispatcher;
             pBTCpuSetContext( GetCurrentThread(), GetCurrentProcess(), NULL, &ctx );
 
-            if (!setjmp( frame.jmpbuf ))
+            if (!__wine_setjmpex( &frame.jmpbuf, NULL ))
                 cpu_simulate();
             else
                 pBTCpuSetContext( GetCurrentThread(), GetCurrentProcess(), NULL, &orig_ctx );
@@ -1443,7 +1468,7 @@ NTSTATUS WINAPI Wow64RaiseException( int code, EXCEPTION_RECORD *rec )
     BOOL first_chance = TRUE;
     union
     {
-        I386_CONTEXT i386;
+        I386_CONTEXT x86;
         ARM_CONTEXT arm;
     } ctx32 = { 0 };
 
@@ -1453,23 +1478,23 @@ NTSTATUS WINAPI Wow64RaiseException( int code, EXCEPTION_RECORD *rec )
     {
         EXCEPTION_RECORD int_rec = { 0 };
 
-        ctx32.i386.ContextFlags = CONTEXT_I386_ALL;
-        pBTCpuGetContext( GetCurrentThread(), GetCurrentProcess(), NULL, &ctx32.i386 );
+        ctx32.x86.ContextFlags = CONTEXT_I386_ALL;
+        pBTCpuGetContext( GetCurrentThread(), GetCurrentProcess(), NULL, &ctx32.x86 );
         if (code == -1) break;
-        int_rec.ExceptionAddress = (void *)(ULONG_PTR)ctx32.i386.Eip;
+        int_rec.ExceptionAddress = (void *)(ULONG_PTR)ctx32.x86.Eip;
         switch (code)
         {
         case 0x00:  /* division by zero */
             int_rec.ExceptionCode = EXCEPTION_INT_DIVIDE_BY_ZERO;
             break;
         case 0x01:  /* single-step */
-            ctx32.i386.EFlags &= ~0x100;
-            pBTCpuSetContext( GetCurrentThread(), GetCurrentProcess(), NULL, &ctx32.i386 );
+            ctx32.x86.EFlags &= ~0x100;
+            pBTCpuSetContext( GetCurrentThread(), GetCurrentProcess(), NULL, &ctx32.x86 );
             int_rec.ExceptionCode = EXCEPTION_SINGLE_STEP;
             break;
         case 0x03:  /* breakpoint */
             int_rec.ExceptionCode = EXCEPTION_BREAKPOINT;
-            int_rec.ExceptionAddress = (void *)(ULONG_PTR)(ctx32.i386.Eip - 1);
+            int_rec.ExceptionAddress = (void *)(ULONG_PTR)(ctx32.x86.Eip - 1);
             int_rec.NumberParameters = 1;
             break;
         case 0x04:  /* overflow */
@@ -1494,20 +1519,20 @@ NTSTATUS WINAPI Wow64RaiseException( int code, EXCEPTION_RECORD *rec )
             int_rec.ExceptionCode = STATUS_STACK_BUFFER_OVERRUN;
             int_rec.ExceptionFlags = EXCEPTION_NONCONTINUABLE;
             int_rec.NumberParameters = 1;
-            int_rec.ExceptionInformation[0] = ctx32.i386.Ecx;
+            int_rec.ExceptionInformation[0] = ctx32.x86.Ecx;
             first_chance = FALSE;
             break;
         case 0x2d:  /* debug service */
-            ctx32.i386.Eip += 3;
-            pBTCpuSetContext( GetCurrentThread(), GetCurrentProcess(), NULL, &ctx32.i386 );
+            ctx32.x86.Eip += 3;
+            pBTCpuSetContext( GetCurrentThread(), GetCurrentProcess(), NULL, &ctx32.x86 );
             int_rec.ExceptionCode    = EXCEPTION_BREAKPOINT;
-            int_rec.ExceptionAddress = (void *)(ULONG_PTR)ctx32.i386.Eip;
+            int_rec.ExceptionAddress = (void *)(ULONG_PTR)ctx32.x86.Eip;
             int_rec.NumberParameters = 1;
-            int_rec.ExceptionInformation[0] = ctx32.i386.Eax;
+            int_rec.ExceptionInformation[0] = ctx32.x86.Eax;
             break;
         default:
             int_rec.ExceptionCode = EXCEPTION_ACCESS_VIOLATION;
-            int_rec.ExceptionAddress = (void *)(ULONG_PTR)ctx32.i386.Eip;
+            int_rec.ExceptionAddress = (void *)(ULONG_PTR)ctx32.x86.Eip;
             int_rec.NumberParameters = 2;
             int_rec.ExceptionInformation[1] = 0xffffffff;
             break;

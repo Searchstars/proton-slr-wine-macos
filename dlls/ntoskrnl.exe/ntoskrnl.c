@@ -5118,11 +5118,11 @@ void WINAPI KeGenericCallDpc(PKDEFERRED_ROUTINE routine, void *context)
 /***********************************************************************
  *           KeIpiGenericCall   (NTOSKRNL.EXE.@)
  */
-ULONG_PTR WINAPI KeIpiGenericCall(PKIPI_BROADCAST_WORKER worker, ULONG_PTR context)
+ULONG_PTR WINAPI KeIpiGenericCall(PKIPI_BROADCAST_WORKER worker, ULONGLONG context)
 {
-    TRACE("worker %p, context %p.\n", worker, (void *)context);
+    TRACE("worker %p, context %p.\n", worker, (void *)(ULONG_PTR)context);
     if (!worker) return 0;
-    return worker(context);
+    return worker((ULONG_PTR)context);
 }
 
 /***********************************************************************

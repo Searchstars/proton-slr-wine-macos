@@ -52,6 +52,18 @@ extern void     (WINAPI *pBTCpuUpdateProcessorInformation)( SYSTEM_CPU_INFORMATI
 extern void     (WINAPI *pBTCpuProcessTerm)( HANDLE, BOOL, NTSTATUS );
 extern void     (WINAPI *pBTCpuThreadTerm)( HANDLE, LONG );
 
+/* winternl.h only declares these under _WIN64, but wow64 32-bit PE code uses them too. */
+#ifndef _WIN64
+extern void      WINAPI RtlOpenCrossProcessEmulatorWorkConnection( HANDLE, HANDLE *, void ** );
+extern NTSTATUS  WINAPI RtlWow64GetThreadContext( HANDLE, WOW64_CONTEXT * );
+extern NTSTATUS  WINAPI RtlWow64GetThreadSelectorEntry( HANDLE, THREAD_DESCRIPTOR_INFORMATION *, ULONG, ULONG * );
+extern CROSS_PROCESS_WORK_ENTRY * WINAPI RtlWow64PopAllCrossProcessWorkFromWorkList( CROSS_PROCESS_WORK_HDR *, BOOLEAN * );
+extern CROSS_PROCESS_WORK_ENTRY * WINAPI RtlWow64PopCrossProcessWorkFromFreeList( CROSS_PROCESS_WORK_HDR * );
+extern BOOLEAN   WINAPI RtlWow64PushCrossProcessWorkOntoFreeList( CROSS_PROCESS_WORK_HDR *, CROSS_PROCESS_WORK_ENTRY * );
+extern BOOLEAN   WINAPI RtlWow64PushCrossProcessWorkOntoWorkList( CROSS_PROCESS_WORK_HDR *, CROSS_PROCESS_WORK_ENTRY *, void ** );
+extern NTSTATUS  WINAPI RtlWow64SetThreadContext( HANDLE, const WOW64_CONTEXT * );
+#endif
+
 struct object_attr64
 {
     OBJECT_ATTRIBUTES   attr;
