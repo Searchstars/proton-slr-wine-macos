@@ -423,20 +423,7 @@ static DWORD emulate_instruction( EXCEPTION_RECORD *rec, CONTEXT *context )
 
     case 0x8a: /* mov Eb, Gb */
     case 0x8b: /* mov Ev, Gv */
-    case 0x0b: /* or Ev, Gv */
-    case 0x33: /* xor Ev, Gv */
     {
-        BYTE *data = INSTR_GetOperandAddr( context, instr + 1, prefixlen + 1, long_addr,
-                                           rex, segprefix, &len );
-        unsigned int data_size = (*instr == 0x8b) ? get_op_size( long_op, rex ) : 1;
-        SIZE_T offset = data - user_shared_data;
-
-        MESSAGE("emulate_instruction: opcode=%02x data=%p user_shared_data=%p offset=%Ix data_size=%u limit=%x\n",
-                *instr, data, user_shared_data, offset, data_size, KSHARED_USER_DATA_PAGE_SIZE - data_size);
-
-        if (offset <= KSHARED_USER_DATA_PAGE_SIZE - data_size)
-        {
-            MESSAGE("emulate_instruction: condition PASSED, emulating instruction\n");
         BYTE *data = INSTR_GetOperandAddr(context, instr + 1, long_addr,
                                           segprefix, &len);
         unsigned int data_size = (*instr == 0x8b) ? (long_op ? 4 : 2) : 1;
@@ -913,15 +900,14 @@ static DWORD emulate_instruction( EXCEPTION_RECORD *rec, CONTEXT *context )
                             long_op, rex, INSTR_OP_OR );
                     break;
                 case 0x33:
-                store_reg_word( context, instr[1], wine_user_shared_data + offset,
-                                long_op, rex, INSTR_OP_XOR );
-                break;
+                    store_reg_word( context, instr[1], wine_user_shared_data + offset,
+                            long_op, rex, INSTR_OP_XOR );
+                    break;
             }
             context->Rip += prefixlen + len + 1;
             return ExceptionContinueExecution;
         }
-        MESSAGE("emulate_instruction: condition FAILED, offset=%Ix > limit=%x\n", offset, KSHARED_USER_DATA_PAGE_SIZE - data_size);
-        break; /* Unable to emulate it */
+        break;  /* Unable to emulate it */
     }
 
     case 0xa0: /* mov Ob, AL */
@@ -983,13 +969,7 @@ LONG CALLBACK vectored_handler( EXCEPTION_POINTERS *ptrs )
         (record->ExceptionCode == EXCEPTION_ACCESS_VIOLATION &&
          record->ExceptionInformation[0] == EXCEPTION_READ_FAULT))
     {
-        MESSAGE("vectored_handler: code=%x addr=%p info0=%Ix info1=%Ix rip=%Ix\n",
-            record->ExceptionCode, record->ExceptionAddress,
-            record->ExceptionInformation[0], record->ExceptionInformation[1],
-            context->Rip);
-        DWORD result = emulate_instruction( record, context );
-        MESSAGE("vectored_handler: emulate_instruction returned %u, rip=%Ix\n", result, context->Rip);
-        if (result == ExceptionContinueExecution)
+        if (emulate_instruction( record, context ) == ExceptionContinueExecution)
         {
             TRACE( "next instruction rip=%Ix\n", context->Rip );
             TRACE( "  rax=%016Ix rbx=%016Ix rcx=%016Ix rdx=%016Ix\n",

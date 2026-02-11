@@ -428,7 +428,6 @@ static inline BOOL have_sse_daz_mode(void)
 static void get_cpuid_name( char *buffer )
 {
     unsigned int regs[4];
-    char *start = buffer;
 
     do_cpuid( 0x80000002, 0, regs );
     memcpy( buffer, regs, sizeof(regs) );
@@ -440,19 +439,6 @@ static void get_cpuid_name( char *buffer )
     memcpy( buffer, regs, sizeof(regs) );
     buffer += sizeof(regs);
     *buffer = 0;
-
-    /* Rosetta may report a CPU brand string starting with "VirtualApple".
-     * Some anti-cheat/anti-VM checks treat that as an emulated/VM environment.
-     * Spoof a plausible x86 CPU model string.
-     */
-    if (strstr( start, "VirtualApple" ))
-    {
-        static const char spoof[] = "Intel(R) Core(TM) i5-6300U CPU @ 2.40GHz";
-        size_t n = strlen( spoof );
-        if (n > 48) n = 48;
-        memcpy( start, spoof, n );
-        start[n] = 0;
-    }
 }
 
 static void get_cpuinfo( SYSTEM_CPU_INFORMATION *info )
@@ -2069,16 +2055,6 @@ static void create_smbios_processors( struct smbios_buffer *buf )
     strcpy( name, cpu_name );
     for (i = strlen(name); i > 0 && name[i - 1] == ' '; i--) name[i - 1] = 0;
 
-    /* Keep SMBIOS processor name plausible on Rosetta. */
-    if (strstr( name, "VirtualApple" ))
-    {
-        static const char spoof[] = "Intel(R) Core(TM) i5-6300U CPU @ 2.40GHz";
-        size_t n = strlen( spoof );
-        if (n > sizeof(name) - 1) n = sizeof(name) - 1;
-        memcpy( name, spoof, n );
-        name[n] = 0;
-    }
-
     while ((char *)p != (char *)logical_proc_info_ex + logical_proc_info_ex_size)
     {
         switch (p->Relationship)
@@ -2329,8 +2305,9 @@ static void cf_to_string( CFTypeRef type_ref, char *buffer, size_t buffer_size )
 static struct smbios_prologue *create_smbios_data(void)
 {
     io_service_t platform_expert;
+    CFDataRef cf_manufacturer, cf_model;
     CFStringRef cf_serial_number, cf_uuid_string;
-    char serial_number[128];
+    char manufacturer[128], model[128], serial_number[128];
     GUID system_uuid = {0};
     BYTE chassis;
     struct smbios_buffer buf = { 0 };
@@ -2355,8 +2332,13 @@ static struct smbios_prologue *create_smbios_data(void)
     if (!platform_expert)
         return NULL;
 
+    cf_manufacturer = IORegistryEntryCreateCFProperty(platform_expert, CFSTR("manufacturer"), kCFAllocatorDefault, 0);
+    cf_model = IORegistryEntryCreateCFProperty(platform_expert, CFSTR("model"), kCFAllocatorDefault, 0);
     cf_serial_number = IORegistryEntryCreateCFProperty(platform_expert, CFSTR(kIOPlatformSerialNumberKey), kCFAllocatorDefault, 0);
     cf_uuid_string = IORegistryEntryCreateCFProperty(platform_expert, CFSTR(kIOPlatformUUIDKey), kCFAllocatorDefault, 0);
+
+    cf_to_string(cf_manufacturer, manufacturer, sizeof(manufacturer));
+    cf_to_string(cf_model, model, sizeof(model));
     cf_to_string(cf_serial_number, serial_number, sizeof(serial_number));
 
     if (cf_uuid_string)
@@ -2378,24 +2360,10 @@ static struct smbios_prologue *create_smbios_data(void)
 
     IOObjectRelease(platform_expert);
 
-    /* Avoid leaking host identity and avoid advertising Apple hardware details to Windows apps.
-     * Some anti-cheat / environment checks treat Apple SMBIOS data as an emulated/VM-like environment.
-     * Generate a stable, PC-like SMBIOS profile instead.
-     */
-    {
-        static const char *vendor  = "Microsoft Corporation";
-        static const char *product = "Surface Pro 4";
-        static const char *version = "1240000000000000";
-        static const char *board   = "Surface_Pro_4";
-        static const char *biosver = "109.3748.768";
-        static const char *biosdate = "05/04/2021";
-        const char *serial = serial_number[0] ? serial_number : "0000000000000000";
-
-        append_smbios_bios( &buf, vendor, biosver, biosdate );
-        append_smbios_system( &buf, vendor, product, version, serial, "", board, &system_uuid );
-        chassis = append_smbios_chassis( &buf, 0, vendor, version, serial, "" );
-        append_smbios_board( &buf, chassis, vendor, board, board, serial, "" );
-    }
+    append_smbios_bios( &buf, manufacturer, "1.0", "01/01/2021" );
+    append_smbios_system( &buf, manufacturer, model, "1.0", serial_number, "", model, &system_uuid );
+    chassis = append_smbios_chassis( &buf, 0, manufacturer, "", serial_number, "" );
+    append_smbios_board( &buf, chassis, manufacturer, model, model, serial_number, "" );
     create_smbios_processors( &buf );
     append_smbios_boot_info( &buf );
     append_smbios_end( &buf );
@@ -2430,19 +2398,6 @@ static NTSTATUS enum_firmware_info( SYSTEM_FIRMWARE_TABLE_INFORMATION *sfti, ULO
                                     ULONG *required_len )
 {
     ULONG len;
-    static int fake_acpi_enabled = -1;
-
-    if (fake_acpi_enabled == -1)
-    {
-        const char *env = getenv( "ASTROWINE_FAKE_ACPI" );
-        if (env && env[0]) fake_acpi_enabled = (strcmp( env, "0" ) != 0);
-        else
-        {
-            /* Default on when running with AstroWine hooks enabled. */
-            const char *hooks = getenv( "ASTROWINE_ROSETTA_HOOKS_PATH" );
-            fake_acpi_enabled = (hooks && hooks[0] && strcmp( hooks, "0" )) ? 1 : 0;
-        }
-    }
 
     switch (sfti->ProviderSignature)
     {
@@ -2453,35 +2408,10 @@ static NTSTATUS enum_firmware_info( SYSTEM_FIRMWARE_TABLE_INFORMATION *sfti, ULO
         *(UINT *)sfti->TableBuffer = 0;
         return STATUS_SUCCESS;
 
-    case ACPI:
-        if (fake_acpi_enabled)
-        {
-            static const char ids[][4] = { { 'F','A','C','P' }, { 'D','S','D','T' }, { 'S','S','D','T' }, { 'A','P','I','C' } };
-            sfti->TableBufferLength = len = sizeof(ids);
-            *required_len = offsetof( SYSTEM_FIRMWARE_TABLE_INFORMATION, TableBuffer[len] );
-            if (available_len < *required_len) return STATUS_BUFFER_TOO_SMALL;
-            memcpy( sfti->TableBuffer, ids, len );
-            return STATUS_SUCCESS;
-        }
-        break;
-
-    case FIRM:
-        if (fake_acpi_enabled)
-        {
-            sfti->TableBufferLength = len = 0;
-            *required_len = offsetof( SYSTEM_FIRMWARE_TABLE_INFORMATION, TableBuffer[len] );
-            if (available_len < *required_len) return STATUS_BUFFER_TOO_SMALL;
-            return STATUS_SUCCESS;
-        }
-        break;
-
     default:
         FIXME("info_class SYSTEM_FIRMWARE_TABLE_INFORMATION provider %08x\n", (unsigned int)sfti->ProviderSignature);
         return STATUS_NOT_IMPLEMENTED;
     }
-
-    FIXME("info_class SYSTEM_FIRMWARE_TABLE_INFORMATION provider %08x\n", (unsigned int)sfti->ProviderSignature);
-    return STATUS_NOT_IMPLEMENTED;
 }
 
 static NTSTATUS get_firmware_info( SYSTEM_FIRMWARE_TABLE_INFORMATION *sfti, ULONG available_len,
@@ -2489,18 +2419,6 @@ static NTSTATUS get_firmware_info( SYSTEM_FIRMWARE_TABLE_INFORMATION *sfti, ULON
 {
     static struct smbios_prologue *smbios_data;
     ULONG len;
-    static int fake_acpi_enabled = -1;
-
-    if (fake_acpi_enabled == -1)
-    {
-        const char *env = getenv( "ASTROWINE_FAKE_ACPI" );
-        if (env && env[0]) fake_acpi_enabled = (strcmp( env, "0" ) != 0);
-        else
-        {
-            const char *hooks = getenv( "ASTROWINE_ROSETTA_HOOKS_PATH" );
-            fake_acpi_enabled = (hooks && hooks[0] && strcmp( hooks, "0" )) ? 1 : 0;
-        }
-    }
 
     switch (sfti->ProviderSignature)
     {
@@ -2518,65 +2436,10 @@ static NTSTATUS get_firmware_info( SYSTEM_FIRMWARE_TABLE_INFORMATION *sfti, ULON
         memcpy( sfti->TableBuffer, smbios_data, len );
         return STATUS_SUCCESS;
 
-    case ACPI:
-        if (fake_acpi_enabled)
-        {
-            struct
-            {
-                char sig[4];
-                UINT32 length;
-                BYTE revision;
-                BYTE checksum;
-                char oem_id[6];
-                char oem_table_id[8];
-                UINT32 oem_revision;
-                UINT32 creator_id;
-                UINT32 creator_revision;
-            } hdr;
-            unsigned int i;
-            BYTE sum;
-
-            memset( &hdr, 0, sizeof(hdr) );
-            memcpy( hdr.sig, &sfti->TableID, sizeof(hdr.sig) );
-            hdr.length = sizeof(hdr);
-            hdr.revision = 2;
-            memcpy( hdr.oem_id, "MSFT  ", 6 );
-            memcpy( hdr.oem_table_id, "SURFACE ", 8 );
-            hdr.oem_revision = 1;
-            hdr.creator_id = 0x57494E45; /* 'WINE' */
-            hdr.creator_revision = 1;
-
-            /* ACPI checksum: sum of bytes over entire table must be 0 mod 256. */
-            hdr.checksum = 0;
-            sum = 0;
-            for (i = 0; i < sizeof(hdr); i++) sum = (BYTE)(sum + ((const BYTE *)&hdr)[i]);
-            hdr.checksum = (BYTE)(0 - sum);
-
-            sfti->TableBufferLength = len = sizeof(hdr);
-            *required_len = offsetof( SYSTEM_FIRMWARE_TABLE_INFORMATION, TableBuffer[len] );
-            if (available_len < *required_len) return STATUS_BUFFER_TOO_SMALL;
-            memcpy( sfti->TableBuffer, &hdr, sizeof(hdr) );
-            return STATUS_SUCCESS;
-        }
-        break;
-
-    case FIRM:
-        if (fake_acpi_enabled)
-        {
-            sfti->TableBufferLength = len = 0;
-            *required_len = offsetof( SYSTEM_FIRMWARE_TABLE_INFORMATION, TableBuffer[len] );
-            if (available_len < *required_len) return STATUS_BUFFER_TOO_SMALL;
-            return STATUS_SUCCESS;
-        }
-        break;
-
     default:
         FIXME("info_class SYSTEM_FIRMWARE_TABLE_INFORMATION provider %08x\n", (unsigned int)sfti->ProviderSignature);
         return STATUS_NOT_IMPLEMENTED;
     }
-
-    FIXME("info_class SYSTEM_FIRMWARE_TABLE_INFORMATION provider %08x\n", (unsigned int)sfti->ProviderSignature);
-    return STATUS_NOT_IMPLEMENTED;
 }
 
 static void get_performance_info( SYSTEM_PERFORMANCE_INFORMATION *info )
@@ -3351,20 +3214,6 @@ NTSTATUS WINAPI NtQuerySystemInformation( SYSTEM_INFORMATION_CLASS class,
 {
     unsigned int ret = STATUS_SUCCESS;
     ULONG len = 0;
-    static int trace_ntqsi = -1;
-
-    if (trace_ntqsi == -1)
-    {
-        const char *env = getenv( "ASTROWINE_TRACE_NTQSI" );
-        trace_ntqsi = (env && env[0] && strcmp( env, "0" )) ? 1 : 0;
-    }
-
-    if (trace_ntqsi)
-    {
-        fprintf( stderr, "NtQuerySystemInformation tid=%04x class=%u (0x%x) info=%p size=%u\n",
-                 (unsigned int)GetCurrentThreadId(), (unsigned int)class, (unsigned int)class, info, (unsigned int)size );
-        fflush( stderr );
-    }
 
     TRACE( "(0x%08x,%p,0x%08x,%p)\n", class, info, (int)size, ret_size );
 
@@ -4158,12 +4007,6 @@ NTSTATUS WINAPI NtQuerySystemInformation( SYSTEM_INFORMATION_CLASS class,
     }
 
     if (ret_size) *ret_size = len;
-    if (trace_ntqsi)
-    {
-        fprintf( stderr, "NtQuerySystemInformation tid=%04x class=%u (0x%x) -> status=%#x len=%u\n",
-                 (unsigned int)GetCurrentThreadId(), (unsigned int)class, (unsigned int)class, (unsigned int)ret, (unsigned int)len );
-        fflush( stderr );
-    }
     return ret;
 }
 
@@ -4172,26 +4015,11 @@ NTSTATUS WINAPI NtQuerySystemInformation( SYSTEM_INFORMATION_CLASS class,
  *              NtQuerySystemInformationEx  (NTDLL.@)
  */
 NTSTATUS WINAPI NtQuerySystemInformationEx( SYSTEM_INFORMATION_CLASS class,
-                                             void *query, ULONG query_len,
-                                             void *info, ULONG size, ULONG *ret_size )
+                                            void *query, ULONG query_len,
+                                            void *info, ULONG size, ULONG *ret_size )
 {
     ULONG len = 0;
     unsigned int ret = STATUS_NOT_IMPLEMENTED;
-    static int trace_ntqsi_ex = -1;
-
-    if (trace_ntqsi_ex == -1)
-    {
-        const char *env = getenv( "ASTROWINE_TRACE_NTQSI" );
-        trace_ntqsi_ex = (env && env[0] && strcmp( env, "0" )) ? 1 : 0;
-    }
-
-    if (trace_ntqsi_ex)
-    {
-        fprintf( stderr, "NtQuerySystemInformationEx tid=%04x class=%u (0x%x) query=%p query_len=%u info=%p size=%u\n",
-                 (unsigned int)GetCurrentThreadId(), (unsigned int)class, (unsigned int)class,
-                 query, (unsigned int)query_len, info, (unsigned int)size );
-        fflush( stderr );
-    }
 
     TRACE( "(0x%08x,%p,%u,%p,%u,%p) stub\n", class, query, (int)query_len, info, (int)size, ret_size );
 
@@ -4321,13 +4149,6 @@ NTSTATUS WINAPI NtQuerySystemInformationEx( SYSTEM_INFORMATION_CLASS class,
         break;
     }
     if (ret_size) *ret_size = len;
-    if (trace_ntqsi_ex)
-    {
-        fprintf( stderr, "NtQuerySystemInformationEx tid=%04x class=%u (0x%x) -> status=%#x len=%u\n",
-                 (unsigned int)GetCurrentThreadId(), (unsigned int)class, (unsigned int)class,
-                 (unsigned int)ret, (unsigned int)len );
-        fflush( stderr );
-    }
     return ret;
 }
 
@@ -4881,210 +4702,11 @@ NTSTATUS WINAPI NtDisplayString( UNICODE_STRING *string )
 /******************************************************************************
  *              NtRaiseHardError  (NTDLL.@)
  */
-static const char *harderror_status_name( NTSTATUS status )
-{
-    switch (status)
-    {
-        case STATUS_ASSERTION_FAILURE: return "STATUS_ASSERTION_FAILURE";
-        case STATUS_ACCESS_VIOLATION: return "STATUS_ACCESS_VIOLATION";
-        case STATUS_PRIVILEGED_INSTRUCTION: return "STATUS_PRIVILEGED_INSTRUCTION";
-        case STATUS_ILLEGAL_INSTRUCTION: return "STATUS_ILLEGAL_INSTRUCTION";
-        default: return NULL;
-    }
-}
-
-static void dump_harderror_unicode_param( unsigned int idx, const void *param )
-{
-    UNICODE_STRING us;
-    WCHAR tmp[256];
-    SIZE_T ret_len = 0;
-    SIZE_T to_read;
-    NTSTATUS status;
-
-    if (!param) return;
-    memset( &us, 0, sizeof(us) );
-    status = NtReadVirtualMemory( NtCurrentProcess(), param, &us, sizeof(us), &ret_len );
-    if (status || us.Length == 0 || !us.Buffer) return;
-
-    to_read = us.Length / sizeof(WCHAR);
-    if (to_read >= ARRAY_SIZE(tmp)) to_read = ARRAY_SIZE(tmp) - 1;
-    memset( tmp, 0, sizeof(tmp) );
-    status = NtReadVirtualMemory( NtCurrentProcess(), us.Buffer, tmp, to_read * sizeof(WCHAR), &ret_len );
-    if (status) return;
-    tmp[to_read] = 0;
-
-    ERR( "  param[%u] unicode=%s\n", idx, debugstr_w( tmp ) );
-    if (getenv( "ASTROWINE_TRACE_HARDERROR" ))
-    {
-        fprintf( stderr, "  param[%u] unicode=%s\n", idx, debugstr_w( tmp ) );
-        fflush( stderr );
-    }
-}
-
-#ifdef __x86_64__
-struct harderror_syscall_frame
-{
-    ULONG64 rax, rbx, rcx, rdx;
-    ULONG64 rsi, rdi, r8, r9;
-    ULONG64 r10, r11, r12, r13;
-    ULONG64 r14, r15;
-    ULONG64 rip;
-    ULONG64 cs;
-    ULONG64 eflags;
-    ULONG64 rsp;
-    ULONG64 ss;
-    ULONG64 rbp;
-};
-
-struct harderror_amd64_thread_data
-{
-    DWORD_PTR dr0, dr1, dr2, dr3, dr6, dr7;
-    void *pthread_teb;
-    struct harderror_syscall_frame *syscall_frame;
-};
-
-static void *get_harderror_syscall_site( ULONG64 *rsp, ULONG64 *rbp, ULONG64 *rax, ULONG64 *rcx )
-{
-    struct harderror_amd64_thread_data *cpu_data =
-        (struct harderror_amd64_thread_data *)ntdll_get_thread_data()->cpu_data;
-
-    if (!cpu_data || !cpu_data->syscall_frame) return NULL;
-    if (rsp) *rsp = cpu_data->syscall_frame->rsp;
-    if (rbp) *rbp = cpu_data->syscall_frame->rbp;
-    if (rax) *rax = cpu_data->syscall_frame->rax;
-    if (rcx) *rcx = cpu_data->syscall_frame->rcx;
-    return (void *)(ULONG_PTR)cpu_data->syscall_frame->rip;
-}
-#else
-static void *get_harderror_syscall_site( ULONG64 *rsp, ULONG64 *rbp, ULONG64 *rax, ULONG64 *rcx )
-{
-    if (rsp) *rsp = 0;
-    if (rbp) *rbp = 0;
-    if (rax) *rax = 0;
-    if (rcx) *rcx = 0;
-    return NULL;
-}
-#endif
-
-static void trace_harderror_site( void *pc, ULONG64 rsp )
-{
-    struct
-    {
-        MEMORY_SECTION_NAME section;
-        WCHAR buffer[512];
-    } section_name;
-    ULONG64 stack_qwords[8];
-    SIZE_T ret_len = 0;
-    NTSTATUS status;
-    unsigned int i;
-
-    if (!pc) return;
-
-    ERR( "NtRaiseHardError syscall site pc %p (%s).\n", pc, wine_debuginfostr_pc( pc ) );
-
-    memset( &section_name, 0, sizeof(section_name) );
-    status = NtQueryVirtualMemory( NtCurrentProcess(), pc, MemoryMappedFilenameInformation,
-                                   &section_name, sizeof(section_name), &ret_len );
-    if (!status && section_name.section.SectionFileName.Buffer)
-        ERR( "NtRaiseHardError syscall site mapped file %s.\n", debugstr_us( &section_name.section.SectionFileName ) );
-
-    if (!rsp) return;
-
-    memset( stack_qwords, 0, sizeof(stack_qwords) );
-    status = NtReadVirtualMemory( NtCurrentProcess(), (void *)(ULONG_PTR)rsp,
-                                  stack_qwords, sizeof(stack_qwords), &ret_len );
-    if (status) {
-        ERR( "NtRaiseHardError syscall stack read failed %#x at rsp %#llx.\n",
-             status, (unsigned long long)rsp );
-        return;
-    }
-
-    ERR( "NtRaiseHardError syscall stack rsp=%#llx captured %u qwords.\n",
-         (unsigned long long)rsp, (unsigned int)(ret_len / sizeof(ULONG64)) );
-    for (i = 0; i < ret_len / sizeof(ULONG64); ++i)
-    {
-        struct
-        {
-            MEMORY_SECTION_NAME section;
-            WCHAR buffer[260];
-        } addr_section;
-        void *addr = (void *)(ULONG_PTR)stack_qwords[i];
-
-        ERR( "NtRaiseHardError syscall stack[%u] %#llx (%s).\n", i,
-             (unsigned long long)stack_qwords[i], wine_debuginfostr_pc( addr ) );
-
-        memset( &addr_section, 0, sizeof(addr_section) );
-        status = NtQueryVirtualMemory( NtCurrentProcess(), addr, MemoryMappedFilenameInformation,
-                                       &addr_section, sizeof(addr_section), NULL );
-        if (!status && addr_section.section.SectionFileName.Buffer)
-            ERR( "NtRaiseHardError syscall stack[%u] mapped file %s.\n", i,
-                 debugstr_us( &addr_section.section.SectionFileName ) );
-    }
-}
-
 NTSTATUS WINAPI NtRaiseHardError( NTSTATUS status, ULONG count,
-                                   ULONG params_mask, void **params,
-                                   HARDERROR_RESPONSE_OPTION option, HARDERROR_RESPONSE *response )
+                                  ULONG params_mask, void **params,
+                                  HARDERROR_RESPONSE_OPTION option, HARDERROR_RESPONSE *response )
 {
-    const char *name = harderror_status_name( status );
-    DWORD tid = GetCurrentThreadId();
-    DWORD pid = GetCurrentProcessId();
-    void *caller = __builtin_extract_return_addr( __builtin_return_address(0) );
-    static int trace_enabled = -1;
-
-    if (trace_enabled == -1)
-    {
-        const char *env = getenv( "ASTROWINE_TRACE_HARDERROR" );
-        trace_enabled = (env && env[0] && strcmp(env, "0")) ? 1 : 0;
-    }
-
-    /* Note: WINEDEBUG=-all suppresses ntdll channel output (including ERR).
-     * When ASTROWINE_TRACE_HARDERROR is enabled, also print to stderr so we
-     * can still see the VM abort reason with quiet debug settings.
-     */
-    ERR( "NtRaiseHardError status=%#x (%s) count=%u params_mask=%#x option=%u pid=%u tid=%04x caller=%p (%s)\n",
-         (int)status, name ? name : "<unknown>", (int)count, (int)params_mask, option, pid, tid,
-         caller, wine_debuginfostr_pc( caller ) );
-    if (trace_enabled)
-    {
-        fprintf( stderr,
-                 "NtRaiseHardError status=%#x (%s) count=%u params_mask=%#x option=%u pid=%u tid=%04x caller=%p (%s)\n",
-                 (int)status, name ? name : "<unknown>", (int)count, (int)params_mask, option, pid, tid,
-                 caller, wine_debuginfostr_pc( caller ) );
-        fflush( stderr );
-    }
-
-    if (count && params)
-    {
-        ULONG i;
-        for (i = 0; i < count && i < 8; i++)
-        {
-            const char *star = (params_mask & (1u << i)) ? "*" : "";
-            ERR( "  param[%u]%s=%p\n", (int)i, star, params[i] );
-            if (trace_enabled)
-            {
-                fprintf( stderr, "  param[%u]%s=%p\n", (int)i, star, params[i] );
-                fflush( stderr );
-            }
-        }
-
-        /* UnicodeStringParameterMask indicates which entries are UNICODE_STRING pointers. */
-        for (i = 0; i < count && i < 8; i++)
-            if (params_mask & (1u << i)) dump_harderror_unicode_param( i, params[i] );
-    }
-
-    if (trace_enabled)
-    {
-        ULONG64 syscall_rsp = 0, syscall_rbp = 0, syscall_rax = 0, syscall_rcx = 0;
-        void *syscall_site = get_harderror_syscall_site( &syscall_rsp, &syscall_rbp, &syscall_rax, &syscall_rcx );
-        ERR( "NtRaiseHardError syscall site=%p (%s) rsp=%#llx rbp=%#llx rax=%#llx rcx=%#llx\n",
-             syscall_site, wine_debuginfostr_pc( syscall_site ),
-             (unsigned long long)syscall_rsp, (unsigned long long)syscall_rbp,
-             (unsigned long long)syscall_rax, (unsigned long long)syscall_rcx );
-        trace_harderror_site( syscall_site, syscall_rsp );
-    }
-
-    if (response) *response = ResponseNotHandled;
+    FIXME( "%#08x %u %#x %p %u %p: stub\n", (int)status, (int)count, (int)params_mask, params, option, response );
     return STATUS_NOT_IMPLEMENTED;
 }
 
