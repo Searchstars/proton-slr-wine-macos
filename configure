@@ -1369,6 +1369,7 @@ enable_npptools
 enable_nsi
 enable_nsiproxy_sys
 enable_ntdll
+enable_wdfldr
 enable_ntdsapi
 enable_ntoskrnl_exe
 enable_ntprint
@@ -23444,6 +23445,7 @@ wine_fn_config_makefile dlls/nsi enable_nsi
 wine_fn_config_makefile dlls/nsi/tests enable_tests
 wine_fn_config_makefile dlls/nsiproxy.sys enable_nsiproxy_sys
 wine_fn_config_makefile dlls/ntdll enable_ntdll
+wine_fn_config_makefile dlls/wdfldr.sys enable_wdfldr
 wine_fn_config_makefile dlls/ntdll/tests enable_tests
 wine_fn_config_makefile dlls/ntdsapi enable_ntdsapi
 wine_fn_config_makefile dlls/ntdsapi/tests enable_tests
